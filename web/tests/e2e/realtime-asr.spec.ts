@@ -11,6 +11,7 @@ const zh = {
   completed: '\u5df2\u5b8c\u6210',
   finalOutputText: '\u6700\u7ec8\u8f93\u51fa\u6587\u672c',
   errorPrefix: '\u9519\u8bef\uff1a',
+  voiceWave: '\u97f3\u6ce2',
 };
 
 const audioDebugDir = path.resolve('../tmp/e2e-audio-debug');
@@ -38,6 +39,7 @@ test('runs the mock realtime ASR recording flow', async ({ page, context }) => {
   const stopButton = page.getByRole('button', { name: zh.stop });
   await expect(stopButton).toBeVisible();
   await expect(page.getByLabel(zh.runtimeStatus).getByText(zh.recording)).toBeVisible();
+  await expect(page.getByLabel(zh.voiceWave)).toBeVisible();
   await expect(page.getByText('mock-task-')).toBeVisible();
 
   await page.waitForTimeout(750);

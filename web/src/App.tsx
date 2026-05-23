@@ -34,6 +34,7 @@ type RecorderStats = {
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:8080';
 const targetSampleRate = 16000;
 const debugEnabled = import.meta.env.DEV;
+const waveBarCount = 24;
 
 const text = {
   apiConnected: '\u0041\u0050\u0049 \u5df2\u8fde\u63a5',
@@ -60,8 +61,7 @@ const text = {
   lastCheck: '\u6700\u8fd1\u68c0\u67e5',
   recorder: '\u5f55\u97f3\u72b6\u6001',
   asrTask: 'ASR \u4efb\u52a1',
-  audioFrames: '\u97f3\u9891\u5e27',
-  volume: '\u97f3\u91cf',
+  voiceWave: '\u97f3\u6ce2',
   errorPrefix: '\u9519\u8bef\uff1a',
   cannotConnectAPI: '\u65e0\u6cd5\u8fde\u63a5 API',
   asrConnectionFailed: '\u8bed\u97f3\u8bc6\u522b\u8fde\u63a5\u5931\u8d25\uff0c\u8bf7\u68c0\u67e5\u540e\u7aef\u670d\u52a1\u548c DASHSCOPE_API_KEY\u3002',
@@ -83,6 +83,7 @@ function App() {
   const [finalText, setFinalText] = useState('');
   const [taskId, setTaskId] = useState<string | null>(null);
   const [recorderStats, setRecorderStats] = useState<RecorderStats>({ frames: 0, bytes: 0, level: 0 });
+  const [waveLevels, setWaveLevels] = useState<number[]>(() => createSilentWave());
 
   const wsRef = useRef<WebSocket | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
@@ -138,6 +139,7 @@ function App() {
     setFinalText('');
     setTaskId(null);
     setRecorderStats({ frames: 0, bytes: 0, level: 0 });
+    setWaveLevels(createSilentWave());
     finalSegmentsRef.current = [];
     setRecordingStateSafe('connecting');
 
@@ -212,6 +214,7 @@ function App() {
 
     if (message.type === 'done') {
       cleanupAudio();
+      setWaveLevels(createSilentWave());
       ws.close();
       setRecordingStateSafe('completed');
       return;
@@ -220,6 +223,7 @@ function App() {
     if (message.type === 'error') {
       setError(message.message ?? text.asrFailed);
       cleanupAudio();
+      setWaveLevels(createSilentWave());
       ws.close();
       setRecordingStateSafe('error');
     }
@@ -229,6 +233,7 @@ function App() {
     debugLog('recording stop requested', recorderStats);
     setRecordingStateSafe('stopping');
     cleanupAudio();
+    setWaveLevels(createSilentWave());
 
     const ws = wsRef.current;
     if (ws && ws.readyState === WebSocket.OPEN) {
@@ -266,6 +271,8 @@ function App() {
       const pcm = encodePCM16(downsampled);
       ws.send(pcm);
       const level = calculateRMS(input);
+      const normalizedLevel = normalizeVoiceLevel(level);
+      setWaveLevels((levels) => [...levels.slice(1), normalizedLevel]);
       setRecorderStats((stats) => {
         const next = {
           frames: stats.frames + 1,
@@ -408,13 +415,20 @@ function App() {
           <span>{text.asrTask}</span>
           <strong>{taskId ?? '-'}</strong>
         </div>
-        <div>
-          <span>{text.audioFrames}</span>
-          <strong>{recorderStats.frames}</strong>
-        </div>
-        <div>
-          <span>{text.volume}</span>
-          <strong>{recorderStats.level.toFixed(4)}</strong>
+        <div className="wave-diagnostic">
+          <span>{text.voiceWave}</span>
+          <div className="wave-bars" aria-label={text.voiceWave}>
+            {waveLevels.map((level, index) => (
+              <i
+                aria-hidden="true"
+                key={`${index}-${level.toFixed(3)}`}
+                style={{
+                  opacity: 0.24 + level * 0.76,
+                  transform: `scaleY(${0.08 + level * 0.92})`,
+                }}
+              />
+            ))}
+          </div>
         </div>
       </section>
 
@@ -472,6 +486,15 @@ function calculateRMS(input: Float32Array) {
     sum += input[i] * input[i];
   }
   return Math.sqrt(sum / input.length);
+}
+
+function normalizeVoiceLevel(rms: number) {
+  const noiseFloor = 0.008;
+  return Math.max(0, Math.min(1, (rms - noiseFloor) * 18));
+}
+
+function createSilentWave() {
+  return Array.from({ length: waveBarCount }, () => 0);
 }
 
 function toWebSocketBase(httpBase: string) {

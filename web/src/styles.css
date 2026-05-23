@@ -283,6 +283,34 @@ textarea:focus {
   white-space: nowrap;
 }
 
+.diagnostics .wave-diagnostic {
+  grid-column: span 2;
+}
+
+.wave-bars {
+  display: grid;
+  grid-template-columns: repeat(24, minmax(3px, 1fr));
+  align-items: center;
+  gap: 4px;
+  height: 32px;
+  padding: 4px 0;
+}
+
+.wave-bars i {
+  display: block;
+  width: 100%;
+  height: 24px;
+  min-height: 24px;
+  border-radius: 999px;
+  background: #245b43;
+  opacity: 0.28;
+  transform-origin: center;
+  transition:
+    transform 90ms ease-out,
+    opacity 90ms ease-out,
+    background-color 90ms ease-out;
+}
+
 .error-banner {
   margin-top: 14px;
   padding: 12px 14px;
@@ -307,6 +335,10 @@ textarea:focus {
   .diagnostics {
     grid-template-columns: 1fr 1fr;
   }
+
+  .diagnostics .wave-diagnostic {
+    grid-column: span 2;
+  }
 }
 
 @media (max-width: 560px) {
@@ -321,6 +353,10 @@ textarea:focus {
 
   .diagnostics {
     grid-template-columns: 1fr;
+  }
+
+  .diagnostics .wave-diagnostic {
+    grid-column: span 1;
   }
 
   .actions {
