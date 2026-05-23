@@ -15,6 +15,7 @@ desktop.ini
 logs/
 tmp/
 temp/
+audio-debug/
 
 # Dependencies and build output
 node_modules/

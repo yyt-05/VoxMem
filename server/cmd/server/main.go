@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/yyt-05/VoxMem/server/internal/asr"
+	"github.com/yyt-05/VoxMem/server/internal/audiodebug"
 	"github.com/yyt-05/VoxMem/server/internal/localenv"
 )
 
@@ -31,6 +33,8 @@ type config struct {
 	asrModel       string
 	asrFormat      string
 	asrSampleRate  int
+	audioDebug     bool
+	audioDebugDir  string
 }
 
 type healthResponse struct {
@@ -59,7 +63,7 @@ func main() {
 	}
 
 	go func() {
-		logger.Info("starting server", "addr", cfg.addr, "env", cfg.env)
+		logger.Info("starting server", "addr", cfg.addr, "env", cfg.env, "asr_mode", cfg.asrMode, "audio_debug", cfg.audioDebug, "audio_debug_dir", cfg.audioDebugDir)
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("server failed", "error", err)
 			os.Exit(1)
@@ -108,12 +112,14 @@ func loadConfig() config {
 		allowedOrigins: allowedOrigins,
 		env:            env,
 		asrMode:        getenv("VOXMEM_ASR_MODE", "aliyun"),
-		asrMockText:    getenv("VOXMEM_ASR_MOCK_TEXT", "今天下午确认接口方案。"),
+		asrMockText:    getenv("VOXMEM_ASR_MOCK_TEXT", "mock final text"),
 		asrAPIKey:      strings.TrimSpace(os.Getenv("DASHSCOPE_API_KEY")),
 		asrEndpoint:    getenv("VOXMEM_ASR_ENDPOINT", asr.DefaultEndpoint),
 		asrModel:       getenv("VOXMEM_ASR_MODEL", asr.DefaultModel),
 		asrFormat:      getenv("VOXMEM_ASR_FORMAT", asr.DefaultFormat),
 		asrSampleRate:  getenvInt("VOXMEM_ASR_SAMPLE_RATE", asr.DefaultSampleRate),
+		audioDebug:     getenvBool("VOXMEM_AUDIO_DEBUG_ENABLED", false),
+		audioDebugDir:  getenv("VOXMEM_AUDIO_DEBUG_DIR", filepath.Join("..", "tmp", "audio-debug")),
 	}
 }
 
@@ -186,7 +192,18 @@ func asrWebSocketHandler(cfg config, logger *slog.Logger) http.HandlerFunc {
 			logger.Warn("send ready failed", "error", err)
 			return
 		}
-		logger.Info("asr session ready", "task_id", started.TaskID, "mode", cfg.asrMode)
+		debugRecorder, err := newAudioDebugRecorder(cfg, started.TaskID, logger)
+		if err != nil {
+			_ = clientConn.WriteJSON(clientEvent{Type: "error", Message: err.Error()})
+			logger.Warn("create audio debug recorder failed", "task_id", started.TaskID, "error", err)
+			return
+		}
+		if debugRecorder != nil {
+			defer closeAudioDebugRecorder(debugRecorder, logger, started.TaskID)
+		}
+
+		sessionStartedAt := time.Now()
+		logger.Info("asr session ready", "task_id", started.TaskID, "mode", cfg.asrMode, "format", cfg.asrFormat, "sample_rate", cfg.asrSampleRate, "audio_debug", cfg.audioDebug)
 
 		writeDone := make(chan struct{})
 		go forwardASREvents(ctx, logger, stream, clientConn, writeDone)
@@ -206,6 +223,11 @@ func asrWebSocketHandler(cfg config, logger *slog.Logger) http.HandlerFunc {
 			case websocket.BinaryMessage:
 				audioFrames++
 				audioBytes += len(data)
+				if debugRecorder != nil {
+					if err := debugRecorder.Write(data); err != nil {
+						logger.Warn("write audio debug failed", "task_id", started.TaskID, "error", err)
+					}
+				}
 				if audioFrames == 1 || audioFrames%50 == 0 {
 					logger.Info("received browser audio", "task_id", started.TaskID, "audio_frames", audioFrames, "audio_bytes", audioBytes)
 				}
@@ -220,7 +242,7 @@ func asrWebSocketHandler(cfg config, logger *slog.Logger) http.HandlerFunc {
 					continue
 				}
 				if message.Type == "stop" {
-					logger.Info("browser requested asr stop", "task_id", started.TaskID, "audio_frames", audioFrames, "audio_bytes", audioBytes)
+					logger.Info("browser requested asr stop", "task_id", started.TaskID, "audio_frames", audioFrames, "audio_bytes", audioBytes, "duration_ms", time.Since(sessionStartedAt).Milliseconds())
 					if err := stream.Finish(); err != nil {
 						_ = clientConn.WriteJSON(clientEvent{Type: "error", Message: err.Error()})
 						logger.Warn("finish asr stream failed", "error", err)
@@ -251,21 +273,38 @@ func handleMockASR(upgrader websocket.Upgrader, cfg config, logger *slog.Logger,
 		logger.Warn("send mock ready failed", "error", err)
 		return
 	}
+	debugRecorder, err := newAudioDebugRecorder(cfg, taskID, logger)
+	if err != nil {
+		_ = clientConn.WriteJSON(clientEvent{Type: "error", Message: err.Error()})
+		logger.Warn("create mock audio debug recorder failed", "task_id", taskID, "error", err)
+		return
+	}
+	if debugRecorder != nil {
+		defer closeAudioDebugRecorder(debugRecorder, logger, taskID)
+	}
+	logger.Info("mock asr session ready", "task_id", taskID, "audio_debug", cfg.audioDebug)
 
 	audioFrames := 0
+	audioBytes := 0
 	for {
 		messageType, data, err := clientConn.ReadMessage()
 		if err != nil {
 			if !websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
-				logger.Warn("read mock websocket failed", "error", err)
+				logger.Warn("read mock websocket failed", "task_id", taskID, "audio_frames", audioFrames, "audio_bytes", audioBytes, "error", err)
 			}
 			return
 		}
 
 		if messageType == websocket.BinaryMessage {
 			audioFrames++
+			audioBytes += len(data)
+			if debugRecorder != nil {
+				if err := debugRecorder.Write(data); err != nil {
+					logger.Warn("write mock audio debug failed", "task_id", taskID, "error", err)
+				}
+			}
 			if audioFrames == 1 {
-				_ = clientConn.WriteJSON(clientEvent{Type: "transcript", Text: strings.TrimSuffix(cfg.asrMockText, "。"), Final: false})
+				_ = clientConn.WriteJSON(clientEvent{Type: "transcript", Text: strings.TrimSuffix(cfg.asrMockText, "."), Final: false})
 			}
 			continue
 		}
@@ -279,14 +318,36 @@ func handleMockASR(upgrader websocket.Upgrader, cfg config, logger *slog.Logger,
 			continue
 		}
 		if message.Type == "stop" {
+			logger.Info("browser requested mock asr stop", "task_id", taskID, "audio_frames", audioFrames, "audio_bytes", audioBytes)
 			if audioFrames == 0 {
-				_ = clientConn.WriteJSON(clientEvent{Type: "transcript", Text: strings.TrimSuffix(cfg.asrMockText, "。"), Final: false})
+				_ = clientConn.WriteJSON(clientEvent{Type: "transcript", Text: strings.TrimSuffix(cfg.asrMockText, "."), Final: false})
 			}
 			_ = clientConn.WriteJSON(clientEvent{Type: "transcript", Text: cfg.asrMockText, Final: true})
 			_ = clientConn.WriteJSON(clientEvent{Type: "done", TaskID: taskID})
 			return
 		}
 	}
+}
+
+func newAudioDebugRecorder(cfg config, taskID string, logger *slog.Logger) (*audiodebug.Recorder, error) {
+	if !cfg.audioDebug {
+		return nil, nil
+	}
+	recorder, err := audiodebug.NewRecorder(cfg.audioDebugDir, taskID, cfg.asrSampleRate)
+	if err != nil {
+		return nil, err
+	}
+	logger.Info("audio debug recording started", "task_id", taskID, "dir", cfg.audioDebugDir)
+	return recorder, nil
+}
+
+func closeAudioDebugRecorder(recorder *audiodebug.Recorder, logger *slog.Logger, taskID string) {
+	pcmPath, wavPath, bytes, err := recorder.Close()
+	if err != nil {
+		logger.Warn("audio debug recording close failed", "task_id", taskID, "error", err)
+		return
+	}
+	logger.Info("audio debug recording saved", "task_id", taskID, "pcm_path", pcmPath, "wav_path", wavPath, "audio_bytes", bytes)
 }
 
 func forwardASREvents(ctx context.Context, logger *slog.Logger, stream *asr.Stream, clientConn *websocket.Conn, done chan<- struct{}) {
@@ -374,4 +435,12 @@ func getenvInt(key string, fallback int) int {
 		return fallback
 	}
 	return parsed
+}
+
+func getenvBool(key string, fallback bool) bool {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
+	if value == "" {
+		return fallback
+	}
+	return value == "1" || value == "true" || value == "yes" || value == "on"
 }
