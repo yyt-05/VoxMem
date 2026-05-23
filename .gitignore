@@ -21,6 +21,9 @@ node_modules/
 dist/
 build/
 coverage/
+*.tsbuildinfo
+web/vite.config.d.ts
+web/vite.config.js
 
 # Python
 __pycache__/
