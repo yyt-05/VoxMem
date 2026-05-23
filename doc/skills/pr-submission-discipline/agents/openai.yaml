@@ -1,0 +1,4 @@
+interface:
+  display_name: "PR Submission Discipline"
+  short_description: "Project PR submission rules and validation workflow."
+  default_prompt: "Use $pr-submission-discipline to prepare a focused VoxMem pull request with a clear title, description, implementation notes, and test evidence."
