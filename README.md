@@ -53,6 +53,29 @@ npm install
 npm run build
 ```
 
+## ASR Probe
+
+After setting `DASHSCOPE_API_KEY` in `D:\VoxMem\.env`, verify Aliyun Paraformer WebSocket authentication and task startup:
+
+```powershell
+cd D:\VoxMem\server
+go run .\cmd\asr-probe -check-only
+```
+
+To verify recognition with a local audio file, use mono 16kHz PCM by default:
+
+```powershell
+cd D:\VoxMem\server
+go run .\cmd\asr-probe -audio D:\path\to\sample.pcm
+```
+
+For a WAV file, set the format flag:
+
+```powershell
+cd D:\VoxMem\server
+go run .\cmd\asr-probe -audio D:\path\to\sample.wav -format wav
+```
+
 ## Development Workflow
 
 - Keep each pull request focused on one feature, fix, or workflow change.
