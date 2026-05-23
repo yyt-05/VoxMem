@@ -35,13 +35,13 @@ test('runs the mock realtime ASR recording flow', async ({ page, context }) => {
   await expect(startButton).toBeEnabled();
   await startButton.click();
 
-  await expect(page.getByRole('button', { name: zh.recording })).toBeVisible();
+  const stopButton = page.getByRole('button', { name: zh.stop });
+  await expect(stopButton).toBeVisible();
   await expect(page.getByLabel(zh.runtimeStatus).getByText(zh.recording)).toBeVisible();
   await expect(page.getByText('mock-task-')).toBeVisible();
 
   await page.waitForTimeout(750);
 
-  const stopButton = page.getByRole('button', { name: zh.stop });
   await expect(stopButton).toBeEnabled();
   await stopButton.click();
 

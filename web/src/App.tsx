@@ -98,8 +98,8 @@ function App() {
     return text.apiOffline;
   }, [healthState]);
 
-  const canStart = healthState === 'ok' && !['connecting', 'recording', 'stopping'].includes(recordingState);
-  const canStop = recordingState === 'recording';
+  const isRecordingActive = ['connecting', 'recording', 'stopping'].includes(recordingState);
+  const canUseRecordButton = healthState === 'ok' && !['connecting', 'stopping'].includes(recordingState);
 
   useEffect(() => {
     void checkHealth();
@@ -239,6 +239,14 @@ function App() {
     setRecordingStateSafe('completed');
   }
 
+  function toggleRecording() {
+    if (recordingStateRef.current === 'recording') {
+      stopRecording();
+      return;
+    }
+    void startRecording();
+  }
+
   function startAudioProcessing(mediaStream: MediaStream, ws: WebSocket) {
     const AudioContextClass = window.AudioContext || window.webkitAudioContext;
     if (!AudioContextClass) {
@@ -330,24 +338,20 @@ function App() {
           </div>
 
           <button
-            className={`record-button ${recordingState === 'recording' ? 'recording' : ''}`}
+            className={`record-button ${isRecordingActive ? 'recording' : ''}`}
             type="button"
-            disabled={!canStart}
-            onClick={() => void startRecording()}
+            disabled={!canUseRecordButton}
+            onClick={toggleRecording}
             title={text.startRecordingTitle}
           >
-            <Mic size={28} aria-hidden="true" />
-            <span>{recordingState === 'recording' ? text.recording : text.start}</span>
+            {isRecordingActive ? <Square size={28} aria-hidden="true" /> : <Mic size={28} aria-hidden="true" />}
+            <span>{isRecordingActive ? text.stop : text.start}</span>
           </button>
 
           <div className="actions">
             <button type="button" onClick={() => void checkHealth()}>
               <RefreshCw size={16} aria-hidden="true" />
               <span>{text.retryAPI}</span>
-            </button>
-            <button type="button" disabled={!canStop} onClick={stopRecording}>
-              <Square size={16} aria-hidden="true" />
-              <span>{text.stop}</span>
             </button>
           </div>
         </div>
