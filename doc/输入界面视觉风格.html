@@ -1,0 +1,616 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>语音助手</title>
+<link href="https://static.mastergo.com/static/ai/resource/html/googleapis/css2" rel="stylesheet">
+<script src="https://static.mastergo.com/static/ai/resource/html/tailwind/tailwind.js"></script>
+<script>
+tailwind.config={
+theme:{
+extend:{
+colors:{
+primary: '#10b981',
+secondary: '#64748b'
+},
+borderRadius:{
+'none':'0px',
+'sm':'2px',
+DEFAULT:'4px',
+'md':'8px',
+'lg':'12px',
+'xl':'16px',
+'2xl':'20px',
+'3xl':'24px',
+'full':'9999px',
+'button':'4px'
+}
+}
+}
+}
+</script>
+<style>
+.whitespace-nowrap {
+white-space: nowrap;
+}
+.!rounded-button {
+border-radius: 4px;
+}
+.animate-pulse {
+animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+@keyframes pulse {
+0%, 100% { opacity: 1; }
+50% { opacity: .5; }
+}
+.bg-gradient-to-r.from-emerald-400.to-teal-500 {
+background: linear-gradient(to right, #10b981, #0d9488);
+}
+.bg-gradient-to-br.from-green-50.to-emerald-50 {
+background: linear-gradient(to bottom right, #f0fdf4, #ecfdf5);
+}
+.line-through {
+text-decoration: line-through;
+}
+.bg-gradient-to-r.from-blue-50.to-cyan-50 {
+background: linear-gradient(to right, #eff6ff, #ecfeff);
+}
+.bg-gradient-to-r.from-purple-50.to-indigo-50 {
+background: linear-gradient(to right, #faf5ff, #eef2ff);
+}
+.bg-gradient-to-r.from-green-50.to-emerald-50 {
+background: linear-gradient(to right, #f0fdf4, #ecfdf5);
+}
+</style>
+<script src="https://static.mastergo.com/static/ai/resource/html/echarts/5.5.0/echarts.min.js"></script>
+<link rel="stylesheet" href="https://static.mastergo.com/static/ai/resource/html/font-awesome/css/all.min.css">
+</head>
+<body class="min-h-screen bg-gradient-to-br from-green-50 to-emerald-50 p-6 pb-20 max-w-[1440px] mx-auto" style="min-height: 1024px;">
+<!-- Header -->
+<header class="flex justify-between items-center mb-8">
+<div class="flex items-center space-x-3">
+<div class="bg-gradient-to-r from-emerald-400 to-teal-500 w-10 h-10 rounded-xl flex items-center justify-center">
+<i class="fas fa-microphone text-white text-lg" style="width: 1rem; height: 1rem; display: flex; justify-content: center; align-items: center;"></i>
+</div>
+<h1 class="text-2xl font-bold text-gray-800">语音助手</h1>
+</div>
+<div class="flex space-x-3">
+<button id="showMetricsBtn" class="!rounded-button whitespace-nowrap bg-white text-gray-700 px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 flex items-center">
+<i class="fas fa-chart-line mr-2" style="width: 1rem; height: 1rem; display: flex; justify-content: center; align-items: center;"></i>
+指标看板
+</button>
+<button id="showHotwordsBtn" class="!rounded-button whitespace-nowrap bg-white text-gray-700 px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 flex items-center">
+<i class="fas fa-tags mr-2" style="width: 1rem; height: 1rem; display: flex; justify-content: center; align-items: center;"></i>
+热词管理
+</button>
+</div>
+</header>
+<!-- Scene Selection -->
+<div class="flex justify-center mb-8">
+<div class="bg-white rounded-2xl shadow-sm p-1 inline-flex">
+<button data-mode="聊天" class="scene-btn px-6 py-2 rounded-xl transition-all duration-300 text-gray-600 hover:bg-gray-100">聊天</button>
+<button data-mode="日报" class="scene-btn px-6 py-2 rounded-xl transition-all duration-300 text-gray-600 hover:bg-gray-100">日报</button>
+<button data-mode="邮件" class="scene-btn px-6 py-2 rounded-xl transition-all duration-300 text-gray-600 hover:bg-gray-100">邮件</button>
+<button data-mode="Prompt" class="scene-btn px-6 py-2 rounded-xl transition-all duration-300 text-gray-600 hover:bg-gray-100">Prompt</button>
+</div>
+</div>
+<!-- Main Content Area -->
+<div class="max-w-6xl mx-auto">
+<div class="bg-white rounded-3xl shadow-lg overflow-hidden">
+<!-- Text Display Area -->
+<div class="p-8">
+<textarea id="textArea" placeholder="点击麦克风开始语音输入..." class="w-full h-96 text-lg text-gray-800 resize-none focus:outline-none leading-relaxed border-none"></textarea>
+<div id="partialTextDisplay" class="mt-4 text-gray-500 italic hidden"></div>
+</div>
+<!-- Control Panel -->
+<div class="bg-gray-50 p-6 flex flex-col items-center">
+<div class="flex space-x-4 mb-4">
+<button id="recordBtn" class="w-16 h-16 flex items-center justify-center !rounded-button bg-white text-gray-700 border border-gray-300 rounded-full hover:bg-gray-50">
+<i class="fas fa-microphone text-xl" style="width: 1.5rem; height: 1.5rem; display: flex; justify-content: center; align-items: center;"></i>
+</button>
+</div>
+<div class="flex space-x-3">
+<button id="acceptBtn" disabled class="!rounded-button whitespace-nowrap bg-white text-gray-700 px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 flex items-center disabled:opacity-50 disabled:cursor-not-allowed">
+<i class="fas fa-check mr-2" style="width: 1rem; height: 1rem; display: flex; justify-content: center; align-items: center;"></i> 确认
+</button>
+<button id="copyBtn" disabled class="!rounded-button whitespace-nowrap bg-white text-gray-700 px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 flex items-center disabled:opacity-50 disabled:cursor-not-allowed">
+<i class="fas fa-copy mr-2" style="width: 1rem; height: 1rem; display: flex; justify-content: center; align-items: center;"></i> 复制
+</button>
+<button id="clearBtn" disabled class="!rounded-button whitespace-nowrap bg-white text-red-600 px-4 py-2 border border-red-300 rounded-lg hover:bg-red-50 flex items-center disabled:opacity-50 disabled:cursor-not-allowed">
+<i class="fas fa-trash mr-2" style="width: 1rem; height: 1rem; display: flex; justify-content: center; align-items: center;"></i> 清空
+</button>
+</div>
+</div>
+</div>
+<!-- Recent Corrections -->
+<div class="mt-8">
+<h2 class="text-xl font-semibold text-gray-800 mb-4">近期修正</h2>
+<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+<div class="bg-white rounded-xl p-4 shadow-sm border border-green-100">
+<div class="flex justify-between items-start">
+<div>
+<div class="text-gray-500 text-sm">原文</div>
+<div class="line-through text-red-400">阿巴阿巴</div>
+</div>
+<div class="mx-2 text-gray-300">→</div>
+<div>
+<div class="text-gray-500 text-sm">修正</div>
+<div class="text-green-600 font-medium">你好</div>
+</div>
+</div>
+</div>
+<div class="bg-white rounded-xl p-4 shadow-sm border border-green-100">
+<div class="flex justify-between items-start">
+<div>
+<div class="text-gray-500 text-sm">原文</div>
+<div class="line-through text-red-400">就是说那个</div>
+</div>
+<div class="mx-2 text-gray-300">→</div>
+<div>
+<div class="text-gray-500 text-sm">修正</div>
+<div class="text-green-600 font-medium">就是说</div>
+</div>
+</div>
+</div>
+<div class="bg-white rounded-xl p-4 shadow-sm border border-green-100">
+<div class="flex justify-between items-start">
+<div>
+<div class="text-gray-500 text-sm">原文</div>
+<div class="line-through text-red-400">人工智能技术</div>
+</div>
+<div class="mx-2 text-gray-300">→</div>
+<div>
+<div class="text-gray-500 text-sm">修正</div>
+<div class="text-green-600 font-medium">AI 技术</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+<!-- Metrics Modal -->
+<div id="metricsModal" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 hidden">
+<div class="bg-white rounded-2xl p-6 w-4/5 max-w-4xl max-h-[90vh] overflow-y-auto">
+<div class="flex justify-between items-center mb-4">
+<h3 class="text-xl font-semibold">识别指标看板</h3>
+<button id="closeMetricsModal" class="text-gray-500 hover:text-gray-700">
+<i class="fas fa-times" style="width: 1.2rem; height: 1.2rem; display: flex; justify-content: center; align-items: center;"></i>
+</button>
+</div>
+<div class="space-y-6">
+<div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+<div class="bg-gradient-to-r from-blue-50 to-cyan-50 rounded-xl p-4 text-center">
+<div class="text-2xl font-bold text-blue-600">280ms</div>
+<div class="text-gray-600">首字延迟</div>
+</div>
+<div class="bg-gradient-to-r from-purple-50 to-indigo-50 rounded-xl p-4 text-center">
+<div class="text-2xl font-bold text-purple-600">650ms</div>
+<div class="text-gray-600">最终延迟</div>
+</div>
+<div class="bg-gradient-to-r from-green-50 to-emerald-50 rounded-xl p-4 text-center">
+<div class="text-2xl font-bold text-green-600">78%</div>
+<div class="text-gray-600">热词命中率</div>
+</div>
+</div>
+<div class="bg-white rounded-xl p-4">
+<div id="metricsChart" style="height: 300px;"></div>
+</div>
+<div class="bg-white rounded-xl overflow-hidden">
+<table class="min-w-full divide-y divide-gray-200">
+<thead class="bg-gray-50">
+<tr>
+<th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">指标</th>
+<th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">数值</th>
+<th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">状态</th>
+</tr>
+</thead>
+<tbody class="bg-white divide-y divide-gray-200">
+<tr>
+<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">识别前 CER</td>
+<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">12.5%</td>
+<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">较高</td>
+</tr>
+<tr>
+<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">识别后 CER</td>
+<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">3.2%</td>
+<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">较低</td>
+</tr>
+<tr>
+<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">修改次数</td>
+<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">3</td>
+<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">较少</td>
+</tr>
+<tr>
+<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">用户满意度</td>
+<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">92%</td>
+<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">高</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+</div>
+</div>
+<!-- Hotwords Management Modal -->
+<div id="hotwordsModal" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 hidden">
+<div class="bg-white rounded-2xl p-6 w-4/5 max-w-4xl max-h-[90vh] overflow-y-auto">
+<div class="flex justify-between items-center mb-4">
+<h3 class="text-xl font-semibold">热词管理</h3>
+<button id="closeHotwordsModal" class="text-gray-500 hover:text-gray-700">
+<i class="fas fa-times" style="width: 1.2rem; height: 1.2rem; display: flex; justify-content: center; align-items: center;"></i>
+</button>
+</div>
+<div class="space-y-6">
+<div class="bg-white rounded-xl p-4">
+<h3 class="font-medium text-gray-800 mb-3">添加新热词</h3>
+<div class="flex space-x-2">
+<input type="text" id="newOriginal" placeholder="原始词汇" class="flex-1 border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary">
+<input type="text" id="newCorrected" placeholder="纠正为" class="flex-1 border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary">
+<button id="addHotwordBtn" class="!rounded-button whitespace-nowrap bg-primary text-white px-4 py-2 rounded-lg hover:bg-green-600 flex items-center">
+<i class="fas fa-plus mr-2" style="width: 1rem; height: 1rem; display: flex; justify-content: center; align-items: center;"></i> 添加
+</button>
+</div>
+</div>
+<div class="bg-white rounded-xl overflow-hidden">
+<table class="min-w-full divide-y divide-gray-200">
+<thead class="bg-gray-50">
+<tr>
+<th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">原始词汇</th>
+<th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">纠正为</th>
+<th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">权重</th>
+<th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">命中次数</th>
+<th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">操作</th>
+</tr>
+</thead>
+<tbody class="bg-white divide-y divide-gray-200" id="hotwordsTableBody">
+<tr>
+<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">阿巴阿巴</td>
+<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">你好</td>
+<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">3</td>
+<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">12</td>
+<td class="px-6 py-4 whitespace-nowrap text-sm">
+<button class="delete-hotword-btn bg-red-500 text-white px-3 py-1 rounded hover:bg-red-600">
+<i class="fas fa-trash" style="width: 1rem; height: 1rem; display: flex; justify-content: center; align-items: center;"></i>
+</button>
+</td>
+</tr>
+<tr>
+<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">就是说</td>
+<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900"></td>
+<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">2</td>
+<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">8</td>
+<td class="px-6 py-4 whitespace-nowrap text-sm">
+<button class="delete-hotword-btn bg-red-500 text-white px-3 py-1 rounded hover:bg-red-600">
+<i class="fas fa-trash" style="width: 1rem; height: 1rem; display: flex; justify-content: center; align-items: center;"></i>
+</button>
+</td>
+</tr>
+<tr>
+<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">那个嘛</td>
+<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900"></td>
+<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">1</td>
+<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">5</td>
+<td class="px-6 py-4 whitespace-nowrap text-sm">
+<button class="delete-hotword-btn bg-red-500 text-white px-3 py-1 rounded hover:bg-red-600">
+<i class="fas fa-trash" style="width: 1rem; height: 1rem; display: flex; justify-content: center; align-items: center;"></i>
+</button>
+</td>
+</tr>
+<tr>
+<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">人工智能</td>
+<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">AI</td>
+<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">4</td>
+<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">20</td>
+<td class="px-6 py-4 whitespace-nowrap text-sm">
+<button class="delete-hotword-btn bg-red-500 text-white px-3 py-1 rounded hover:bg-red-600">
+<i class="fas fa-trash" style="width: 1rem; height: 1rem; display: flex; justify-content: center; align-items: center;"></i>
+</button>
+</td>
+</tr>
+<tr>
+<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">机器学习</td>
+<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">ML</td>
+<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">3</td>
+<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">15</td>
+<td class="px-6 py-4 whitespace-nowrap text-sm">
+<button class="delete-hotword-btn bg-red-500 text-white px-3 py-1 rounded hover:bg-red-600">
+<i class="fas fa-trash" style="width: 1rem; height: 1rem; display: flex; justify-content: center; align-items: center;"></i>
+</button>
+</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+</div>
+</div>
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+// State variables
+let isRecording = false;
+let partialText = '';
+let finalText = '';
+let currentMode = '聊天';
+let intervalId = null;
+let hotwords = [
+{ id: 1, original: '阿巴阿巴', corrected: '你好', weight: 3, hits: 12 },
+{ id: 2, original: '就是说', corrected: '', weight: 2, hits: 8 },
+{ id: 3, original: '那个嘛', corrected: '', weight: 1, hits: 5 },
+{ id: 4, original: '人工智能', corrected: 'AI', weight: 4, hits: 20 },
+{ id: 5, original: '机器学习', corrected: 'ML', weight: 3, hits: 15 }
+];
+let nextHotwordId = 6;
+// Sample texts for simulation
+const sampleTexts = [
+'今天天气不错，我们去公园散步吧',
+'人工智能技术正在快速发展',
+'语音识别准确率有了显著提升',
+'用户体验设计很重要',
+'小清新风格让人感觉舒适'
+];
+// DOM elements
+const textArea = document.getElementById('textArea');
+const partialTextDisplay = document.getElementById('partialTextDisplay');
+const recordBtn = document.getElementById('recordBtn');
+const acceptBtn = document.getElementById('acceptBtn');
+const copyBtn = document.getElementById('copyBtn');
+const clearBtn = document.getElementById('clearBtn');
+const showMetricsBtn = document.getElementById('showMetricsBtn');
+const showHotwordsBtn = document.getElementById('showHotwordsBtn');
+const metricsModal = document.getElementById('metricsModal');
+const hotwordsModal = document.getElementById('hotwordsModal');
+const closeMetricsModal = document.getElementById('closeMetricsModal');
+const closeHotwordsModal = document.getElementById('closeHotwordsModal');
+const newOriginal = document.getElementById('newOriginal');
+const newCorrected = document.getElementById('newCorrected');
+const addHotwordBtn = document.getElementById('addHotwordBtn');
+const sceneBtns = document.querySelectorAll('.scene-btn');
+// Initialize ECharts
+const metricsChartDom = document.getElementById('metricsChart');
+const metricsChart = echarts.init(metricsChartDom);
+const metricsChartOption = {
+tooltip: {
+trigger: 'axis'
+},
+legend: {
+data: ['识别前', '识别后']
+},
+grid: {
+left: '3%',
+right: '4%',
+bottom: '3%',
+containLabel: true
+},
+xAxis: {
+type: 'category',
+boundaryGap: false,
+data: ['CER', '延迟', '命中率']
+},
+yAxis: {
+type: 'value',
+name: '数值'
+},
+series: [
+{
+name: '识别前',
+type: 'line',
+stack: '总量',
+data: [12.5, 800, 0],
+itemStyle: {
+color: '#ff6b6b'
+}
+},
+{
+name: '识别后',
+type: 'line',
+stack: '总量',
+data: [3.2, 650, 78],
+itemStyle: {
+color: '#51cf66'
+}
+}
+],
+animation: false
+};
+metricsChart.setOption(metricsChartOption);
+// Update text area content
+function updateTextArea() {
+textArea.value = finalText + (finalText && partialText ? '\n\n' : '') + partialText;
+updateButtonStates();
+}
+// Update button states based on content
+function updateButtonStates() {
+const hasContent = finalText || partialText;
+acceptBtn.disabled = !hasContent;
+copyBtn.disabled = !hasContent;
+clearBtn.disabled = !hasContent;
+}
+// Simulate real-time recognition
+function startRecording() {
+isRecording = true;
+recordBtn.innerHTML = '<i class="fas fa-stop text-xl" style="width: 1.5rem; height: 1.5rem; display: flex; justify-content: center; align-items: center;"></i>';
+recordBtn.classList.add('animate-pulse', 'bg-red-500', 'text-white');
+recordBtn.classList.remove('bg-white', 'text-gray-700', 'hover:bg-gray-50');
+intervalId = setInterval(() => {
+const randomText = sampleTexts[Math.floor(Math.random() * sampleTexts.length)];
+const randomLength = Math.floor(Math.random() * randomText.length) + 1;
+partialText = randomText.substring(0, randomLength);
+if (partialTextDisplay.classList.contains('hidden')) {
+partialTextDisplay.classList.remove('hidden');
+}
+partialTextDisplay.textContent = `正在识别: ${partialText}`;
+updateTextArea();
+}, 200);
+}
+function stopRecording() {
+isRecording = false;
+recordBtn.innerHTML = '<i class="fas fa-microphone text-xl" style="width: 1.5rem; height: 1.5rem; display: flex; justify-content: center; align-items: center;"></i>';
+recordBtn.classList.remove('animate-pulse', 'bg-red-500', 'text-white');
+recordBtn.classList.add('bg-white', 'text-gray-700', 'hover:bg-gray-50');
+if (intervalId) {
+clearInterval(intervalId);
+}
+}
+// Event listeners
+recordBtn.addEventListener('click', function() {
+if (isRecording) {
+stopRecording();
+} else {
+startRecording();
+}
+});
+acceptBtn.addEventListener('click', function() {
+if (partialText || finalText) {
+finalText = finalText + (finalText ? '\n\n' : '') + (partialText || finalText);
+partialText = '';
+partialTextDisplay.classList.add('hidden');
+updateTextArea();
+showMessage('文本已接受');
+}
+});
+copyBtn.addEventListener('click', function() {
+navigator.clipboard.writeText(textArea.value).then(() => {
+showMessage('已复制到剪贴板');
+}).catch(err => {
+console.error('Failed to copy: ', err);
+});
+});
+clearBtn.addEventListener('click', function() {
+finalText = '';
+partialText = '';
+partialTextDisplay.classList.add('hidden');
+updateTextArea();
+showMessage('文本已清空');
+});
+showMetricsBtn.addEventListener('click', function() {
+metricsModal.classList.remove('hidden');
+});
+showHotwordsBtn.addEventListener('click', function() {
+hotwordsModal.classList.remove('hidden');
+});
+closeMetricsModal.addEventListener('click', function() {
+metricsModal.classList.add('hidden');
+});
+closeHotwordsModal.addEventListener('click', function() {
+hotwordsModal.classList.add('hidden');
+});
+addHotwordBtn.addEventListener('click', function() {
+if (newOriginal.value.trim()) {
+const newItem = {
+id: nextHotwordId++,
+original: newOriginal.value,
+corrected: newCorrected.value,
+weight: 1,
+hits: 0
+};
+hotwords.push(newItem);
+newOriginal.value = '';
+newCorrected.value = '';
+updateHotwordsTable();
+showMessage('热词已添加');
+}
+});
+// Scene selection
+sceneBtns.forEach(btn => {
+btn.addEventListener('click', function() {
+currentMode = this.getAttribute('data-mode');
+sceneBtns.forEach(b => {
+b.classList.remove('bg-gradient-to-r', 'from-emerald-400', 'to-teal-500', 'text-white', 'shadow-md');
+b.classList.add('text-gray-600', 'hover:bg-gray-100');
+});
+this.classList.remove('text-gray-600', 'hover:bg-gray-100');
+this.classList.add('bg-gradient-to-r', 'from-emerald-400', 'to-teal-500', 'text-white', 'shadow-md');
+});
+});
+// Set initial active scene
+document.querySelector(`.scene-btn[data-mode="${currentMode}"]`).classList.remove('text-gray-600', 'hover:bg-gray-100');
+document.querySelector(`.scene-btn[data-mode="${currentMode}"]`).classList.add('bg-gradient-to-r', 'from-emerald-400', 'to-teal-500', 'text-white', 'shadow-md');
+// Post-processing mode selection
+postModeBtns.forEach(btn => {
+btn.addEventListener('click', function() {
+currentPostMode = this.getAttribute('data-post-mode');
+postModeBtns.forEach(b => {
+b.classList.remove('bg-gradient-to-r', 'from-emerald-400', 'to-teal-500', 'text-white', 'shadow-md');
+b.classList.add('text-gray-600', 'hover:bg-gray-100');
+});
+this.classList.remove('text-gray-600', 'hover:bg-gray-100');
+this.classList.add('bg-gradient-to-r', 'from-emerald-400', 'to-teal-500', 'text-white', 'shadow-md');
+// Show message about mode change
+const modeDescription = {
+'原声模式': '保留原话，仅做专名/错字修正',
+'轻整理模式': '自动标点、轻微清理',
+'清爽模式': '去口头禅，适合日报/笔记',
+'逻辑修正模式': '异步AI句序整理、书面化'
+};
+showMessage(`${currentPostMode}：${modeDescription[currentPostMode]}`);
+});
+});
+// Set initial active post-processing mode
+document.querySelector(`.post-mode-btn[data-post-mode="${currentPostMode}"]`).classList.remove('text-gray-600', 'hover:bg-gray-100');
+document.querySelector(`.post-mode-btn[data-post-mode="${currentPostMode}"]`).classList.add('bg-gradient-to-r', 'from-emerald-400', 'to-teal-500', 'text-white', 'shadow-md');
+// Delete hotword functionality
+function updateHotwordsTable() {
+const tableBody = document.getElementById('hotwordsTableBody');
+tableBody.innerHTML = '';
+hotwords.forEach(hotword => {
+const row = document.createElement('tr');
+row.innerHTML = `
+<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">${hotword.original}</td>
+<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">${hotword.corrected}</td>
+<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">${hotword.weight}</td>
+<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">${hotword.hits}</td>
+<td class="px-6 py-4 whitespace-nowrap text-sm">
+<button class="delete-hotword-btn bg-red-500 text-white px-3 py-1 rounded hover:bg-red-600">
+<i class="fas fa-trash" style="width: 1rem; height: 1rem; display: flex; justify-content: center; align-items: center;"></i>
+</button>
+</td>
+`;
+tableBody.appendChild(row);
+});
+// Add event listeners to delete buttons
+document.querySelectorAll('.delete-hotword-btn').forEach(btn => {
+btn.addEventListener('click', function() {
+const row = this.closest('tr');
+const original = row.cells[0].textContent;
+hotwords = hotwords.filter(item => item.original !== original);
+row.remove();
+showMessage('热词已删除');
+});
+});
+}
+// Initial update of button states
+updateButtonStates();
+// Show message function
+function showMessage(message) {
+// Create a temporary message element
+const messageEl = document.createElement('div');
+messageEl.textContent = message;
+messageEl.style.position = 'fixed';
+messageEl.style.top = '20px';
+messageEl.style.left = '50%';
+messageEl.style.transform = 'translateX(-50%)';
+messageEl.style.backgroundColor = '#10b981';
+messageEl.style.color = 'white';
+messageEl.style.padding = '8px 16px';
+messageEl.style.borderRadius = '4px';
+messageEl.style.zIndex = '1000';
+messageEl.style.boxShadow = '0 2px 8px rgba(0,0,0,0.15)';
+document.body.appendChild(messageEl);
+setTimeout(() => {
+document.body.removeChild(messageEl);
+}, 2000);
+}
+// Close modals when clicking outside
+window.addEventListener('click', function(event) {
+if (event.target === metricsModal) {
+metricsModal.classList.add('hidden');
+}
+if (event.target === hotwordsModal) {
+hotwordsModal.classList.add('hidden');
+}
+});
+});
+</script>
+</body>
+</html>
