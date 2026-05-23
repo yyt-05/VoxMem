@@ -311,6 +311,14 @@ textarea:focus {
     background-color 90ms ease-out;
 }
 
+.diagnostics .wave-warning {
+  margin-top: 6px;
+  color: #9f372f;
+  font-size: 12px;
+  font-weight: 650;
+  white-space: normal;
+}
+
 .error-banner {
   margin-top: 14px;
   padding: 12px 14px;

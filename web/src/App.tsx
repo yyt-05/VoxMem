@@ -29,6 +29,7 @@ type RecorderStats = {
   frames: number;
   bytes: number;
   level: number;
+  peakLevel: number;
 };
 
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:8080';
@@ -62,6 +63,7 @@ const text = {
   recorder: '\u5f55\u97f3\u72b6\u6001',
   asrTask: 'ASR \u4efb\u52a1',
   voiceWave: '\u97f3\u6ce2',
+  micSilent: '\u672a\u68c0\u6d4b\u5230\u9ea6\u514b\u98ce\u58f0\u97f3\uff0c\u8bf7\u68c0\u67e5\u6d4f\u89c8\u5668\u9ea6\u514b\u98ce\u6743\u9650\u548c\u8f93\u5165\u8bbe\u5907\u3002',
   errorPrefix: '\u9519\u8bef\uff1a',
   cannotConnectAPI: '\u65e0\u6cd5\u8fde\u63a5 API',
   asrConnectionFailed: '\u8bed\u97f3\u8bc6\u522b\u8fde\u63a5\u5931\u8d25\uff0c\u8bf7\u68c0\u67e5\u540e\u7aef\u670d\u52a1\u548c DASHSCOPE_API_KEY\u3002',
@@ -82,7 +84,7 @@ function App() {
   const [liveText, setLiveText] = useState('');
   const [finalText, setFinalText] = useState('');
   const [taskId, setTaskId] = useState<string | null>(null);
-  const [recorderStats, setRecorderStats] = useState<RecorderStats>({ frames: 0, bytes: 0, level: 0 });
+  const [recorderStats, setRecorderStats] = useState<RecorderStats>({ frames: 0, bytes: 0, level: 0, peakLevel: 0 });
   const [waveLevels, setWaveLevels] = useState<number[]>(() => createSilentWave());
 
   const wsRef = useRef<WebSocket | null>(null);
@@ -101,6 +103,7 @@ function App() {
 
   const isRecordingActive = ['connecting', 'recording', 'stopping'].includes(recordingState);
   const canUseRecordButton = healthState === 'ok' && !['connecting', 'stopping'].includes(recordingState);
+  const micLooksSilent = recordingState === 'recording' && recorderStats.frames > 20 && recorderStats.peakLevel < 0.001;
 
   useEffect(() => {
     void checkHealth();
@@ -138,7 +141,7 @@ function App() {
     setLiveText('');
     setFinalText('');
     setTaskId(null);
-    setRecorderStats({ frames: 0, bytes: 0, level: 0 });
+    setRecorderStats({ frames: 0, bytes: 0, level: 0, peakLevel: 0 });
     setWaveLevels(createSilentWave());
     finalSegmentsRef.current = [];
     setRecordingStateSafe('connecting');
@@ -155,6 +158,10 @@ function App() {
       });
       mediaStreamRef.current = mediaStream;
       debugLog('microphone opened', mediaStream.getAudioTracks().map((track) => track.label));
+      const audioContext = createAudioContext();
+      await audioContext.resume();
+      audioContextRef.current = audioContext;
+      debugLog('audio context prepared', { state: audioContext.state, sampleRate: audioContext.sampleRate });
 
       const ws = new WebSocket(`${toWebSocketBase(apiBaseUrl)}/ws/asr?user_id=${encodeURIComponent(getUserID())}`);
       ws.binaryType = 'arraybuffer';
@@ -253,12 +260,9 @@ function App() {
   }
 
   function startAudioProcessing(mediaStream: MediaStream, ws: WebSocket) {
-    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-    if (!AudioContextClass) {
-      throw new Error(text.audioContextUnsupported);
-    }
-
-    const audioContext = new AudioContextClass();
+    const audioContext = audioContextRef.current ?? createAudioContext();
+    audioContextRef.current = audioContext;
+    void audioContext.resume();
     const source = audioContext.createMediaStreamSource(mediaStream);
     const processor = audioContext.createScriptProcessor(4096, 1, 1);
 
@@ -271,16 +275,18 @@ function App() {
       const pcm = encodePCM16(downsampled);
       ws.send(pcm);
       const level = calculateRMS(input);
-      const normalizedLevel = normalizeVoiceLevel(level);
+      const peakLevel = calculatePeak(input);
+      const normalizedLevel = normalizeVoiceLevel(level, peakLevel);
       setWaveLevels((levels) => [...levels.slice(1), normalizedLevel]);
       setRecorderStats((stats) => {
         const next = {
           frames: stats.frames + 1,
           bytes: stats.bytes + pcm.byteLength,
           level,
+          peakLevel: Math.max(stats.peakLevel, peakLevel),
         };
         if (debugEnabled && next.frames % 100 === 1) {
-          debugLog('audio frame sent', { frames: next.frames, bytes: next.bytes, level });
+          debugLog('audio frame sent', { frames: next.frames, bytes: next.bytes, level, peakLevel });
         }
         return next;
       });
@@ -429,6 +435,7 @@ function App() {
               />
             ))}
           </div>
+          {micLooksSilent ? <strong className="wave-warning">{text.micSilent}</strong> : null}
         </div>
       </section>
 
@@ -488,13 +495,28 @@ function calculateRMS(input: Float32Array) {
   return Math.sqrt(sum / input.length);
 }
 
-function normalizeVoiceLevel(rms: number) {
-  const noiseFloor = 0.008;
-  return Math.max(0, Math.min(1, (rms - noiseFloor) * 18));
+function calculatePeak(input: Float32Array) {
+  let peak = 0;
+  for (let i = 0; i < input.length; i += 1) {
+    peak = Math.max(peak, Math.abs(input[i]));
+  }
+  return peak;
+}
+
+function normalizeVoiceLevel(rms: number, peak: number) {
+  return Math.max(0, Math.min(1, Math.max(rms * 45, peak * 2.5)));
 }
 
 function createSilentWave() {
   return Array.from({ length: waveBarCount }, () => 0);
+}
+
+function createAudioContext() {
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContextClass) {
+    throw new Error(text.audioContextUnsupported);
+  }
+  return new AudioContextClass();
 }
 
 function toWebSocketBase(httpBase: string) {

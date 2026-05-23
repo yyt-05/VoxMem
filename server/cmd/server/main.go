@@ -367,6 +367,7 @@ func forwardASREvents(ctx context.Context, logger *slog.Logger, stream *asr.Stre
 				return
 			}
 
+			logger.Info("asr event received", "task_id", stream.TaskID(), "event", event.Header.Event, "raw_len", len(event.Raw), "raw_preview", truncateLogValue(event.Raw, 500))
 			if text, final := asr.ExtractSentence(event); text != "" {
 				logger.Info("forward asr transcript", "task_id", stream.TaskID(), "final", final, "text_len", len(text))
 				if err := clientConn.WriteJSON(clientEvent{Type: "transcript", Text: text, Final: final}); err != nil {
@@ -380,6 +381,13 @@ func forwardASREvents(ctx context.Context, logger *slog.Logger, stream *asr.Stre
 			}
 		}
 	}
+}
+
+func truncateLogValue(value string, limit int) string {
+	if len(value) <= limit {
+		return value
+	}
+	return value[:limit] + "..."
 }
 
 func requestLogger(logger *slog.Logger, next http.Handler) http.Handler {
