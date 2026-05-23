@@ -24,6 +24,8 @@ coverage/
 *.tsbuildinfo
 web/vite.config.d.ts
 web/vite.config.js
+web/test-results/
+web/playwright-report/
 
 # Python
 __pycache__/
