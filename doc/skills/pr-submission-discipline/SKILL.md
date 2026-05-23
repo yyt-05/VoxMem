@@ -1,47 +1,53 @@
 ---
 name: pr-submission-discipline
-description: VoxMem project pull request and Git submission discipline. Use when adding a new feature, modifying project behavior, preparing a PR title or description, splitting work into reviewable PRs, or verifying that a branch is ready to merge.
+description: VoxMem 项目的 PR 提交与 Git 协作规范。用于新增功能、修改项目行为、准备 PR 标题或描述、拆分可评审的小粒度 PR，以及检查分支是否达到合并要求。
 ---
 
-# PR Submission Discipline
+# PR 提交规范
 
-## Overview
+## 概述
 
-Use this skill to keep VoxMem changes small, reviewable, and reproducible. Every feature or behavior change must land through a focused PR that keeps the target branch runnable after merge.
+使用本 skill 约束 VoxMem 项目的功能开发与 PR 提交流程。目标是让每个 PR 足够小、边界清晰、便于评审，并且合并后主分支始终保持可运行、可复现演示效果。
 
-## Core Rules
+## 核心规则
 
-- Add new features through PRs, not direct commits to the main branch.
-- Make each PR do exactly one thing: one feature, one fix, one workflow change, or one documentation concern.
-- Split large features into multiple independent PRs that can be reviewed and merged step by step.
-- Keep each PR as small as practical while still leaving the project in a runnable state.
-- Keep `main` runnable after merge so reviewers can reproduce the demo at any time.
+- 新功能必须基于 PR 添加，不直接向主分支提交功能代码。
+- 每个 PR 只做一件事：一个功能、一个修复、一个流程调整，或一个文档规范。
+- 大功能必须拆分为多个可独立评审、可独立合并的小 PR 分步提交。
+- PR 粒度尽可能小，但合并后项目仍必须保持完整可运行。
+- PR 合并后，主分支代码必须保持可运行状态，评委在任意时间查看都应能复现演示效果。
 
-## Workflow
+## 开发流程
 
-1. Start from an up-to-date `main` branch unless the repository later defines another integration branch.
-2. Create a focused branch named for the single scope, such as `feat/add-memory-card`, `fix/audio-upload-error`, or `docs/add-pr-submission-skill`.
-3. Implement only the files needed for that scope.
-4. Run the narrowest useful validation command for the change.
-5. Commit only the intended files with a clear message, such as `feat: add memory card creation` or `docs: add PR submission discipline skill`.
-6. Push the branch and open a PR targeting `main`.
-7. Do not merge until the PR title, description, and validation evidence are complete.
+1. 从最新的 `main` 分支开始开发，除非项目后续明确指定其他集成分支。
+2. 按单一目标创建分支，例如 `feat/add-memory-card`、`fix/audio-upload-error`、`docs/add-pr-submission-skill`。
+3. 只修改当前 PR 范围内必须修改的文件。
+4. 根据变更范围运行最小但有效的验证命令。
+5. 只提交本 PR 范围内的文件，提交信息要清楚，例如 `feat: add memory card creation` 或 `docs: add PR submission discipline skill`。
+6. 推送分支并创建指向 `main` 的 PR。
+7. PR 标题、描述和测试记录完整后再合并。
 
-## PR Title
+## PR 标题
 
-Write one sentence that clearly states what this PR adds or changes.
+标题必须用一句话说明本 PR 新增或修改了什么。
 
-Good examples:
+好的示例：
 
-- `Add memory card creation flow`
-- `Document PR submission discipline`
-- `Fix audio upload failure handling`
+- `新增记忆卡片创建流程`
+- `沉淀 PR 提交规范 skill`
+- `修复音频上传失败处理`
 
-Avoid vague titles such as `update`, `fix`, `optimize`, `changes`, or `final`.
+避免使用这类模糊标题：
 
-## PR Description
+- `update`
+- `fix`
+- `优化`
+- `修改`
+- `最终版`
 
-Use this exact structure:
+## PR 描述
+
+PR 描述必须使用以下结构：
 
 ```markdown
 ## 功能描述
@@ -62,21 +68,21 @@ Use this exact structure:
 说明未覆盖的边界、上线注意事项、后续 PR 应继续处理什么。没有明显风险时写“暂无已知风险”。
 ```
 
-## Validation
+## 测试要求
 
-Before opening or merging a PR:
+创建或合并 PR 前必须完成以下检查：
 
-- Run the relevant tests, build, lint, or manual verification for the changed area.
-- Record the exact command and result in the PR description.
-- If no automated test exists yet, document the manual verification steps.
-- If validation cannot run, state the blocker and residual risk in the PR description.
+- 运行与本次变更相关的测试、构建、lint 或人工验证步骤。
+- 在 PR 描述中记录实际执行的命令和结果。
+- 如果当前没有自动化测试，写清楚人工验证步骤。
+- 如果验证无法执行，写清楚阻塞原因和残余风险。
 
-## Merge Checklist
+## 合并检查清单
 
-- The PR has one clear scope.
-- The PR title is a one-sentence summary of the change.
-- The PR description includes 功能描述, 实现思路, 测试方式, and 风险与后续.
-- The listed validation steps actually ran.
-- The target branch remains runnable after merge.
-- `main` remains demo-ready for reviewers and judges.
-- The PR does not include secrets, local logs, generated output, unrelated refactors, or unrelated formatting changes.
+- PR 只有一个清晰目标。
+- PR 标题用一句话说明新增或修改内容。
+- PR 描述包含“功能描述”“实现思路”“测试方式”“风险与后续”。
+- PR 描述中列出的测试或验证步骤已经真实执行。
+- 合并后目标分支保持可运行。
+- `main` 分支保持可演示状态，评委可随时复现。
+- PR 不包含密钥、本地日志、生成产物、无关重构或无关格式化修改。
