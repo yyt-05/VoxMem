@@ -32,6 +32,14 @@ type RecorderStats = {
   peakLevel: number;
 };
 
+type MicDiagnostics = {
+  label: string;
+  state: string;
+  muted: boolean;
+  sampleRate?: number;
+  channelCount?: number;
+};
+
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:8080';
 const targetSampleRate = 16000;
 const debugEnabled = import.meta.env.DEV;
@@ -43,6 +51,8 @@ const text = {
   apiOffline: '\u0041\u0050\u0049 \u672a\u8fde\u63a5',
   workspaceTitle: '\u8bed\u97f3\u8f93\u5165\u5de5\u4f5c\u53f0',
   outputMode: '\u8f93\u51fa\u6a21\u5f0f',
+  microphone: '\u9ea6\u514b\u98ce',
+  defaultMicrophone: '\u7cfb\u7edf\u9ed8\u8ba4\u9ea6\u514b\u98ce',
   polish: '\u8f7b\u6574\u7406',
   raw: '\u539f\u58f0',
   start: '\u5f00\u59cb',
@@ -61,6 +71,7 @@ const text = {
   environment: '\u73af\u5883',
   lastCheck: '\u6700\u8fd1\u68c0\u67e5',
   recorder: '\u5f55\u97f3\u72b6\u6001',
+  inputDevice: '\u8f93\u5165\u8bbe\u5907',
   asrTask: 'ASR \u4efb\u52a1',
   voiceWave: '\u97f3\u6ce2',
   micSilent: '\u672a\u68c0\u6d4b\u5230\u9ea6\u514b\u98ce\u58f0\u97f3\uff0c\u8bf7\u68c0\u67e5\u6d4f\u89c8\u5668\u9ea6\u514b\u98ce\u6743\u9650\u548c\u8f93\u5165\u8bbe\u5907\u3002',
@@ -86,6 +97,9 @@ function App() {
   const [taskId, setTaskId] = useState<string | null>(null);
   const [recorderStats, setRecorderStats] = useState<RecorderStats>({ frames: 0, bytes: 0, level: 0, peakLevel: 0 });
   const [waveLevels, setWaveLevels] = useState<number[]>(() => createSilentWave());
+  const [audioDevices, setAudioDevices] = useState<MediaDeviceInfo[]>([]);
+  const [selectedDeviceId, setSelectedDeviceId] = useState('');
+  const [micDiagnostics, setMicDiagnostics] = useState<MicDiagnostics | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
@@ -107,6 +121,7 @@ function App() {
 
   useEffect(() => {
     void checkHealth();
+    void refreshAudioDevices();
 
     return () => {
       cleanupAudio();
@@ -136,6 +151,23 @@ function App() {
     }
   }
 
+  async function refreshAudioDevices() {
+    if (!navigator.mediaDevices?.enumerateDevices) {
+      return;
+    }
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const microphones = devices.filter((device) => device.kind === 'audioinput');
+      setAudioDevices(microphones);
+      debugLog('audio devices refreshed', microphones.map((device) => ({
+        deviceId: device.deviceId,
+        label: device.label,
+      })));
+    } catch (err) {
+      debugLog('audio devices refresh failed', err instanceof Error ? err.message : err);
+    }
+  }
+
   async function startRecording() {
     setError(null);
     setLiveText('');
@@ -148,16 +180,10 @@ function App() {
 
     try {
       debugLog('recording start requested');
-      const mediaStream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          channelCount: 1,
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        },
-      });
+      const mediaStream = await navigator.mediaDevices.getUserMedia({ audio: createAudioConstraints(selectedDeviceId) });
       mediaStreamRef.current = mediaStream;
-      debugLog('microphone opened', mediaStream.getAudioTracks().map((track) => track.label));
+      updateMicDiagnostics(mediaStream);
+      void refreshAudioDevices();
       const audioContext = createAudioContext();
       await audioContext.resume();
       audioContextRef.current = audioContext;
@@ -313,6 +339,24 @@ function App() {
     audioContextRef.current = null;
   }
 
+  function updateMicDiagnostics(mediaStream: MediaStream) {
+    const track = mediaStream.getAudioTracks()[0];
+    if (!track) {
+      setMicDiagnostics(null);
+      return;
+    }
+    const settings = track.getSettings();
+    const diagnostics = {
+      label: track.label || text.defaultMicrophone,
+      state: track.readyState,
+      muted: track.muted,
+      sampleRate: settings.sampleRate,
+      channelCount: settings.channelCount,
+    };
+    setMicDiagnostics(diagnostics);
+    debugLog('microphone opened', diagnostics);
+  }
+
   function setRecordingStateSafe(nextState: RecordingState) {
     recordingStateRef.current = nextState;
     setRecordingState(nextState);
@@ -349,6 +393,22 @@ function App() {
               </button>
             ))}
           </div>
+
+          <label className="mic-selector">
+            <span>{text.microphone}</span>
+            <select
+              value={selectedDeviceId}
+              onChange={(event) => setSelectedDeviceId(event.target.value)}
+              disabled={isRecordingActive}
+            >
+              <option value="">{text.defaultMicrophone}</option>
+              {audioDevices.map((device, index) => (
+                <option key={device.deviceId || `mic-${index}`} value={device.deviceId}>
+                  {device.label || `${text.microphone} ${index + 1}`}
+                </option>
+              ))}
+            </select>
+          </label>
 
           <button
             className={`record-button ${isRecordingActive ? 'recording' : ''}`}
@@ -416,6 +476,12 @@ function App() {
         <div>
           <span>{text.recorder}</span>
           <strong>{recordingStateLabel(recordingState)}</strong>
+        </div>
+        <div>
+          <span>{text.inputDevice}</span>
+          <strong title={micDiagnostics ? formatMicDiagnostics(micDiagnostics) : undefined}>
+            {micDiagnostics ? formatMicDiagnostics(micDiagnostics) : '-'}
+          </strong>
         </div>
         <div>
           <span>{text.asrTask}</span>
@@ -511,12 +577,33 @@ function createSilentWave() {
   return Array.from({ length: waveBarCount }, () => 0);
 }
 
+function createAudioConstraints(deviceId: string): MediaTrackConstraints {
+  return {
+    autoGainControl: false,
+    channelCount: 1,
+    deviceId: deviceId ? { exact: deviceId } : undefined,
+    echoCancellation: false,
+    noiseSuppression: false,
+  };
+}
+
 function createAudioContext() {
   const AudioContextClass = window.AudioContext || window.webkitAudioContext;
   if (!AudioContextClass) {
     throw new Error(text.audioContextUnsupported);
   }
   return new AudioContextClass();
+}
+
+function formatMicDiagnostics(diagnostics: MicDiagnostics) {
+  const details = [
+    diagnostics.label,
+    diagnostics.muted ? 'muted' : '',
+    diagnostics.sampleRate ? `${diagnostics.sampleRate}Hz` : '',
+    diagnostics.channelCount ? `${diagnostics.channelCount}ch` : '',
+    diagnostics.state,
+  ].filter(Boolean);
+  return details.join(' / ');
 }
 
 function toWebSocketBase(httpBase: string) {

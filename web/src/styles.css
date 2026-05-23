@@ -137,6 +137,31 @@ h1 {
   box-shadow: 0 1px 3px rgba(38, 35, 25, 0.12);
 }
 
+.mic-selector {
+  display: grid;
+  gap: 6px;
+}
+
+.mic-selector span {
+  color: #77746a;
+  font-size: 12px;
+}
+
+.mic-selector select {
+  width: 100%;
+  min-height: 38px;
+  border: 1px solid #d9d3c8;
+  border-radius: 6px;
+  padding: 0 10px;
+  color: #272a25;
+  background: #ffffff;
+}
+
+.mic-selector select:disabled {
+  color: #8f8a80;
+  background: #f4f1ea;
+}
+
 .record-button {
   display: grid;
   width: 172px;
