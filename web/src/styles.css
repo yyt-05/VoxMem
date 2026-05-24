@@ -481,9 +481,9 @@ button:disabled {
 
 .result-flow {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1.06fr);
-  gap: 22px;
-  align-items: center;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 16px;
+  align-items: stretch;
 }
 
 .source-text {
@@ -516,6 +516,19 @@ button:disabled {
   white-space: pre-wrap;
 }
 
+.live-transcript-panel {
+  display: grid;
+  min-height: 210px;
+  align-content: start;
+}
+
+.live-transcript-panel .transcript-text,
+.live-transcript-panel .placeholder {
+  max-height: clamp(210px, 26vh, 340px);
+  overflow: auto;
+  padding-right: 6px;
+}
+
 .edited-card textarea {
   width: 100%;
   min-height: 118px;
@@ -529,6 +542,10 @@ button:disabled {
   outline: none;
 }
 
+.polished-text-panel textarea {
+  min-height: 150px;
+}
+
 .edited-card textarea::placeholder {
   color: #253247;
   opacity: 1;
@@ -537,11 +554,6 @@ button:disabled {
 .processed-inline {
   margin-top: 10px;
   color: #253247;
-}
-
-.flow-arrow {
-  color: #9ba6b6;
-  font-size: 34px;
 }
 
 .command-bar {
@@ -851,13 +863,6 @@ button:disabled {
     padding-left: 0;
   }
 
-  .result-flow {
-    grid-template-columns: 1fr;
-  }
-
-  .flow-arrow {
-    display: none;
-  }
 }
 
 @media (max-width: 760px) {
