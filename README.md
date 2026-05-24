@@ -108,6 +108,28 @@ The output modes are:
 
 When you edit the input text, the web app waits briefly for the text to stabilize, then automatically sends it to the API for `raw`, `polish`, or `markdown` processing. If the edited input differs from the local-memory-enhanced ASR text, the API stores a correction record in SQLite and extracts a local `from_text -> to_text` replacement. Future ASR final text for the same browser `user_id` applies those replacements before any LLM call. Newly learned replacements appear in a dismissible memory dialog with an undo action, and the hotword memory panel shows recent replacements and allows deletion.
 
+## File Transcription Voice Filter
+
+The optional voice-filter flow records the full browser WAV, posts it to `POST /api/transcribe/file`, uploads it to Qiniu Kodo, then submits the downloadable URL to DashScope file transcription with speaker diarization enabled. The API returns `sentences`, `full_text`, and `speaker_count`; the web app can then let the user keep one detected speaker.
+
+Configure Kodo before using this flow. Supported `VOXMEM_KODO_REGION` values include `z0`, `z1`, `z2`, `na0`, `as0`, and `cn-east-2`.
+
+```powershell
+$env:VOXMEM_KODO_ACCESS_KEY = "your-qiniu-access-key"
+$env:VOXMEM_KODO_SECRET_KEY = "your-qiniu-secret-key"
+$env:VOXMEM_KODO_BUCKET = "your-bucket"
+$env:VOXMEM_KODO_REGION = "z0"
+$env:VOXMEM_KODO_DOMAIN = "https://your-download-domain.example.com"
+$env:VOXMEM_KODO_USE_HTTPS = "true"
+```
+
+`VOXMEM_KODO_DOMAIN` must be reachable by DashScope. For private Kodo buckets, also set:
+
+```powershell
+$env:VOXMEM_KODO_PRIVATE_BUCKET = "true"
+$env:VOXMEM_KODO_URL_TTL_SECONDS = "3600"
+```
+
 ## Debug Logs and Audio Capture
 
 The API writes structured logs for these core events:

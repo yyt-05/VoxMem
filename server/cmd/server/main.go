@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -18,8 +19,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/aliyun/aliyun-oss-go-sdk/oss"
 	"github.com/gorilla/websocket"
+	"github.com/qiniu/go-sdk/v7/auth"
+	"github.com/qiniu/go-sdk/v7/storage"
 	"github.com/yyt-05/VoxMem/server/internal/asr"
 	"github.com/yyt-05/VoxMem/server/internal/audiodebug"
 	"github.com/yyt-05/VoxMem/server/internal/localenv"
@@ -30,27 +32,32 @@ import (
 const serviceName = "voxmem-api"
 
 type config struct {
-	addr               string
-	allowedOrigins     map[string]struct{}
-	env                string
-	asrMode            string
-	asrMockText        string
-	asrAPIKey          string
-	asrEndpoint        string
-	asrModel           string
-	asrFormat          string
-	asrSampleRate      int
-	audioDebug         bool
-	audioDebugDir      string
-	dbPath             string
-	llmAPIKey          string
-	llmBaseURL         string
-	llmModel           string
-	llmTimeout         time.Duration
-	ossEndpoint        string
-	ossAccessKeyID     string
-	ossAccessKeySecret string
-	ossBucket          string
+	addr              string
+	allowedOrigins    map[string]struct{}
+	env               string
+	asrMode           string
+	asrMockText       string
+	asrAPIKey         string
+	asrEndpoint       string
+	asrModel          string
+	asrFormat         string
+	asrSampleRate     int
+	audioDebug        bool
+	audioDebugDir     string
+	dbPath            string
+	llmAPIKey         string
+	llmBaseURL        string
+	llmModel          string
+	llmTimeout        time.Duration
+	kodoAccessKey     string
+	kodoSecretKey     string
+	kodoBucket        string
+	kodoRegion        string
+	kodoDomain        string
+	kodoUseHTTPS      bool
+	kodoPrivateBucket bool
+	kodoURLTTL        time.Duration
+	kodoUploadPrefix  string
 }
 
 type healthResponse struct {
@@ -137,27 +144,32 @@ func loadConfig() config {
 	}
 
 	return config{
-		addr:               addr,
-		allowedOrigins:     allowedOrigins,
-		env:                env,
-		asrMode:            getenv("VOXMEM_ASR_MODE", "aliyun"),
-		asrMockText:        getenv("VOXMEM_ASR_MOCK_TEXT", "mock final text"),
-		asrAPIKey:          strings.TrimSpace(os.Getenv("DASHSCOPE_API_KEY")),
-		asrEndpoint:        getenv("VOXMEM_ASR_ENDPOINT", asr.DefaultEndpoint),
-		asrModel:           getenv("VOXMEM_ASR_MODEL", asr.DefaultModel),
-		asrFormat:          getenv("VOXMEM_ASR_FORMAT", asr.DefaultFormat),
-		asrSampleRate:      getenvInt("VOXMEM_ASR_SAMPLE_RATE", asr.DefaultSampleRate),
-		audioDebug:         getenvBool("VOXMEM_AUDIO_DEBUG_ENABLED", false),
-		audioDebugDir:      getenv("VOXMEM_AUDIO_DEBUG_DIR", filepath.Join("..", "tmp", "audio-debug")),
-		dbPath:             getenv("VOXMEM_DB_PATH", filepath.Join("..", "data", "voxmem.db")),
-		llmAPIKey:          strings.TrimSpace(os.Getenv("VOXMEM_LLM_API_KEY")),
-		llmBaseURL:         strings.TrimSpace(os.Getenv("VOXMEM_LLM_BASE_URL")),
-		llmModel:           strings.TrimSpace(os.Getenv("VOXMEM_LLM_MODEL")),
-		llmTimeout:         time.Duration(getenvInt("VOXMEM_LLM_TIMEOUT_SECONDS", 8)) * time.Second,
-		ossEndpoint:        getenv("VOXMEM_OSS_ENDPOINT", "oss-cn-hangzhou.aliyuncs.com"),
-		ossAccessKeyID:     strings.TrimSpace(os.Getenv("VOXMEM_OSS_ACCESS_KEY_ID")),
-		ossAccessKeySecret: strings.TrimSpace(os.Getenv("VOXMEM_OSS_ACCESS_KEY_SECRET")),
-		ossBucket:          strings.TrimSpace(os.Getenv("VOXMEM_OSS_BUCKET")),
+		addr:              addr,
+		allowedOrigins:    allowedOrigins,
+		env:               env,
+		asrMode:           getenv("VOXMEM_ASR_MODE", "aliyun"),
+		asrMockText:       getenv("VOXMEM_ASR_MOCK_TEXT", "mock final text"),
+		asrAPIKey:         strings.TrimSpace(os.Getenv("DASHSCOPE_API_KEY")),
+		asrEndpoint:       getenv("VOXMEM_ASR_ENDPOINT", asr.DefaultEndpoint),
+		asrModel:          getenv("VOXMEM_ASR_MODEL", asr.DefaultModel),
+		asrFormat:         getenv("VOXMEM_ASR_FORMAT", asr.DefaultFormat),
+		asrSampleRate:     getenvInt("VOXMEM_ASR_SAMPLE_RATE", asr.DefaultSampleRate),
+		audioDebug:        getenvBool("VOXMEM_AUDIO_DEBUG_ENABLED", false),
+		audioDebugDir:     getenv("VOXMEM_AUDIO_DEBUG_DIR", filepath.Join("..", "tmp", "audio-debug")),
+		dbPath:            getenv("VOXMEM_DB_PATH", filepath.Join("..", "data", "voxmem.db")),
+		llmAPIKey:         strings.TrimSpace(os.Getenv("VOXMEM_LLM_API_KEY")),
+		llmBaseURL:        strings.TrimSpace(os.Getenv("VOXMEM_LLM_BASE_URL")),
+		llmModel:          strings.TrimSpace(os.Getenv("VOXMEM_LLM_MODEL")),
+		llmTimeout:        time.Duration(getenvInt("VOXMEM_LLM_TIMEOUT_SECONDS", 8)) * time.Second,
+		kodoAccessKey:     strings.TrimSpace(os.Getenv("VOXMEM_KODO_ACCESS_KEY")),
+		kodoSecretKey:     strings.TrimSpace(os.Getenv("VOXMEM_KODO_SECRET_KEY")),
+		kodoBucket:        strings.TrimSpace(os.Getenv("VOXMEM_KODO_BUCKET")),
+		kodoRegion:        getenv("VOXMEM_KODO_REGION", "z0"),
+		kodoDomain:        strings.TrimSpace(os.Getenv("VOXMEM_KODO_DOMAIN")),
+		kodoUseHTTPS:      getenvBool("VOXMEM_KODO_USE_HTTPS", true),
+		kodoPrivateBucket: getenvBool("VOXMEM_KODO_PRIVATE_BUCKET", false),
+		kodoURLTTL:        time.Duration(getenvInt("VOXMEM_KODO_URL_TTL_SECONDS", 3600)) * time.Second,
+		kodoUploadPrefix:  getenv("VOXMEM_KODO_UPLOAD_PREFIX", "audio/"),
 	}
 }
 
@@ -727,7 +739,7 @@ func fileTranscribeHandler(cfg config, logger *slog.Logger) http.HandlerFunc {
 			return
 		}
 
-		publicURL, err := uploadToOSS(cfg, r.Context(), audioData)
+		publicURL, err := uploadToKodo(cfg, r.Context(), audioData)
 		if err != nil {
 			logger.Warn("file transcribe: upload failed", "error", err)
 			writeError(w, http.StatusInternalServerError, fmt.Errorf("upload audio: %w", err))
@@ -770,29 +782,118 @@ func fileTranscribeHandler(cfg config, logger *slog.Logger) http.HandlerFunc {
 	}
 }
 
-func uploadToOSS(cfg config, ctx context.Context, data []byte) (string, error) {
-	client, err := oss.New(cfg.ossEndpoint, cfg.ossAccessKeyID, cfg.ossAccessKeySecret)
+func uploadToKodo(cfg config, ctx context.Context, data []byte) (string, error) {
+	if strings.TrimSpace(cfg.kodoAccessKey) == "" {
+		return "", fmt.Errorf("VOXMEM_KODO_ACCESS_KEY is required")
+	}
+	if strings.TrimSpace(cfg.kodoSecretKey) == "" {
+		return "", fmt.Errorf("VOXMEM_KODO_SECRET_KEY is required")
+	}
+	if strings.TrimSpace(cfg.kodoBucket) == "" {
+		return "", fmt.Errorf("VOXMEM_KODO_BUCKET is required")
+	}
+	if strings.TrimSpace(cfg.kodoDomain) == "" {
+		return "", fmt.Errorf("VOXMEM_KODO_DOMAIN is required")
+	}
+
+	objectKey := newAudioObjectKey(cfg.kodoUploadPrefix)
+	putPolicy := storage.PutPolicy{
+		Scope: cfg.kodoBucket + ":" + objectKey,
+	}
+	mac := auth.New(cfg.kodoAccessKey, cfg.kodoSecretKey)
+	upToken := putPolicy.UploadToken(mac)
+
+	region, err := kodoRegion(cfg.kodoRegion)
 	if err != nil {
-		return "", fmt.Errorf("create oss client: %w", err)
+		return "", err
 	}
-	bucket, err := client.Bucket(cfg.ossBucket)
-	if err != nil {
-		return "", fmt.Errorf("get oss bucket: %w", err)
+
+	uploader := storage.NewFormUploader(&storage.Config{
+		Zone:          region,
+		UseHTTPS:      cfg.kodoUseHTTPS,
+		UseCdnDomains: false,
+	})
+	ret := storage.PutRet{}
+	if err := uploader.Put(ctx, &ret, upToken, objectKey, bytes.NewReader(data), int64(len(data)), &storage.PutExtra{MimeType: "audio/wav"}); err != nil {
+		return "", fmt.Errorf("kodo put object: %w", err)
 	}
-	objectKey := "audio/" + time.Now().Format("20060102-150405") + "-" + randomHex(8) + ".wav"
-	if err := bucket.PutObject(objectKey, bytes.NewReader(data)); err != nil {
-		return "", fmt.Errorf("oss put object: %w", err)
+
+	publicURL := kodoAccessURL(cfg, mac, objectKey)
+	slog.Info("file transcribe: uploaded to Kodo", "url", publicURL, "bytes", len(data), "bucket", cfg.kodoBucket)
+	return publicURL, nil
+}
+
+func newAudioObjectKey(prefix string) string {
+	prefix = strings.TrimLeft(strings.TrimSpace(prefix), "/")
+	if prefix != "" && !strings.HasSuffix(prefix, "/") {
+		prefix += "/"
 	}
-	url := "https://" + cfg.ossBucket + "." + cfg.ossEndpoint + "/" + objectKey
-	slog.Info("file transcribe: uploaded to OSS", "url", url, "bytes", len(data))
-	return url, nil
+	return prefix + time.Now().Format("20060102-150405") + "-" + randomHex(8) + ".wav"
+}
+
+func kodoRegion(region string) (*storage.Zone, error) {
+	switch strings.ToLower(strings.TrimSpace(region)) {
+	case "", "z0", "huadong", "east-china":
+		return &storage.ZoneHuadong, nil
+	case "z1", "huabei", "north-china":
+		return &storage.ZoneHuabei, nil
+	case "z2", "huanan", "south-china":
+		return &storage.ZoneHuanan, nil
+	case "na0", "beimei", "north-america":
+		return &storage.ZoneBeimei, nil
+	case "as0", "xinjiapo", "singapore":
+		return &storage.ZoneXinjiapo, nil
+	case "cn-east-2", "huadong-zhejiang2", "zhejiang2":
+		return &storage.ZoneHuadongZheJiang2, nil
+	default:
+		zone, ok := storage.GetRegionByID(storage.RegionID(region))
+		if !ok {
+			return nil, fmt.Errorf("unsupported VOXMEM_KODO_REGION %q", region)
+		}
+		return &zone, nil
+	}
+}
+
+func kodoAccessURL(cfg config, mac *auth.Credentials, objectKey string) string {
+	domain := kodoDomain(cfg.kodoDomain, cfg.kodoUseHTTPS)
+	if cfg.kodoPrivateBucket {
+		ttl := cfg.kodoURLTTL
+		if ttl <= 0 {
+			ttl = time.Hour
+		}
+		return storage.MakePrivateURLv2(mac, domain, objectKey, time.Now().Add(ttl).Unix())
+	}
+	return storage.MakePublicURLv2(domain, objectKey)
+}
+
+func kodoPublicURL(domain string, objectKey string, useHTTPS bool) string {
+	return storage.MakePublicURLv2(kodoDomain(domain, useHTTPS), objectKey)
+}
+
+func kodoDomain(domain string, useHTTPS bool) string {
+	domain = strings.TrimRight(strings.TrimSpace(domain), "/")
+	if !strings.HasPrefix(domain, "http://") && !strings.HasPrefix(domain, "https://") {
+		if useHTTPS {
+			domain = "https://" + domain
+		} else {
+			domain = "http://" + domain
+		}
+	}
+	return domain
 }
 
 func randomHex(n int) string {
 	const hexChars = "0123456789abcdef"
+	raw := make([]byte, n)
+	if _, err := rand.Read(raw); err != nil {
+		now := time.Now().UnixNano()
+		for i := range raw {
+			raw[i] = byte(now >> (i % 8 * 8))
+		}
+	}
 	b := make([]byte, n)
-	for i := range b {
-		b[i] = hexChars[time.Now().UnixNano()%int64(len(hexChars))]
+	for i, value := range raw {
+		b[i] = hexChars[int(value)%len(hexChars)]
 	}
 	return string(b)
 }

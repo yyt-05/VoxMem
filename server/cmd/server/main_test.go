@@ -75,6 +75,55 @@ func TestLoadConfigAllows5174ByDefault(t *testing.T) {
 	}
 }
 
+func TestLoadConfigReadsKodoSettings(t *testing.T) {
+	t.Setenv("VOXMEM_KODO_ACCESS_KEY", "ak")
+	t.Setenv("VOXMEM_KODO_SECRET_KEY", "sk")
+	t.Setenv("VOXMEM_KODO_BUCKET", "voxmem-audio")
+	t.Setenv("VOXMEM_KODO_REGION", "z2")
+	t.Setenv("VOXMEM_KODO_DOMAIN", "cdn.example.com")
+	t.Setenv("VOXMEM_KODO_USE_HTTPS", "false")
+
+	cfg := loadConfig()
+	if cfg.kodoAccessKey != "ak" || cfg.kodoSecretKey != "sk" || cfg.kodoBucket != "voxmem-audio" {
+		t.Fatalf("unexpected kodo credentials: %+v", cfg)
+	}
+	if cfg.kodoRegion != "z2" {
+		t.Fatalf("expected kodo region z2, got %q", cfg.kodoRegion)
+	}
+	if cfg.kodoDomain != "cdn.example.com" {
+		t.Fatalf("expected kodo domain, got %q", cfg.kodoDomain)
+	}
+	if cfg.kodoUseHTTPS {
+		t.Fatal("expected kodo https flag to be false")
+	}
+}
+
+func TestKodoPublicURL(t *testing.T) {
+	got := kodoPublicURL("cdn.example.com/", "audio/test file.wav", true)
+	want := "https://cdn.example.com/audio/test%20file.wav"
+	if got != want {
+		t.Fatalf("expected %q, got %q", want, got)
+	}
+
+	got = kodoPublicURL("http://cdn.example.com/base", "audio/test.wav", true)
+	want = "http://cdn.example.com/base/audio/test.wav"
+	if got != want {
+		t.Fatalf("expected %q, got %q", want, got)
+	}
+}
+
+func TestKodoRegionAliases(t *testing.T) {
+	if _, err := kodoRegion("z0"); err != nil {
+		t.Fatalf("expected z0 to be supported: %v", err)
+	}
+	if _, err := kodoRegion("singapore"); err != nil {
+		t.Fatalf("expected singapore alias to be supported: %v", err)
+	}
+	if _, err := kodoRegion("unknown-region"); err == nil {
+		t.Fatal("expected unsupported region to return an error")
+	}
+}
+
 func TestMockASRWebSocketFlow(t *testing.T) {
 	store := testStore(t)
 	defer store.Close()
@@ -280,6 +329,29 @@ func TestCorrectionAndHotwordsHandlers(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "张力") || !strings.Contains(rec.Body.String(), "张立") {
 		t.Fatalf("expected mapping in hotwords response, got %s", rec.Body.String())
+	}
+}
+
+func TestKodoDomainAddsSchemeAndTrimsSlash(t *testing.T) {
+	if got := kodoDomain("cdn.example.com/", true); got != "https://cdn.example.com" {
+		t.Fatalf("unexpected https domain: %q", got)
+	}
+	if got := kodoDomain("http://cdn.example.com/", true); got != "http://cdn.example.com" {
+		t.Fatalf("unexpected explicit domain: %q", got)
+	}
+}
+
+func TestNewAudioObjectKeyNormalizesPrefix(t *testing.T) {
+	key := newAudioObjectKey("/voice-filter")
+	if !strings.HasPrefix(key, "voice-filter/") || !strings.HasSuffix(key, ".wav") {
+		t.Fatalf("unexpected object key: %q", key)
+	}
+}
+
+func TestUploadToKodoRequiresConfig(t *testing.T) {
+	_, err := uploadToKodo(config{}, context.Background(), []byte{1, 2, 3})
+	if err == nil || !strings.Contains(err.Error(), "VOXMEM_KODO_ACCESS_KEY") {
+		t.Fatalf("expected missing Kodo access key error, got %v", err)
 	}
 }
 

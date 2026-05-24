@@ -259,10 +259,11 @@ p {
 
 .app-shell {
   display: grid;
-  width: min(1720px, calc(100% - 80px));
+  width: min(1500px, calc(100% - 80px));
   min-height: 100vh;
   margin: 0 auto;
   grid-template-rows: auto minmax(0, 1fr);
+  row-gap: 22px;
   padding: clamp(20px, 3vh, 36px) 0 10px;
 }
 
@@ -396,8 +397,8 @@ button:disabled {
   display: grid;
   min-height: 0;
   grid-template-columns: minmax(0, 1fr) 300px;
-  gap: 28px;
-  padding: 28px 32px 28px 38px;
+  gap: 32px;
+  padding: 34px 32px 28px 38px;
 }
 
 .text-pane {
@@ -406,9 +407,9 @@ button:disabled {
 
 .main-pane {
   display: grid;
-  min-height: clamp(590px, 68vh, 790px);
-  grid-template-rows: auto minmax(210px, 1fr) auto auto auto;
-  gap: 18px;
+  min-height: clamp(620px, 70vh, 800px);
+  grid-template-rows: auto minmax(250px, 1fr) auto auto auto;
+  gap: 20px;
 }
 
 .input-hint {
@@ -420,31 +421,34 @@ button:disabled {
 .voice-console {
   position: relative;
   display: grid;
-  min-height: 270px;
-  place-items: center;
+  min-height: 285px;
+  align-content: center;
+  justify-items: center;
+  gap: 18px;
   overflow: hidden;
 }
 
 .voice-waveform {
   display: grid;
-  width: min(1040px, 100%);
-  height: clamp(150px, 24vh, 230px);
-  grid-template-columns: repeat(64, minmax(3px, 1fr));
+  width: min(1100px, 100%);
+  height: clamp(130px, 20vh, 215px);
+  grid-template-columns: repeat(44, minmax(4px, 1fr));
   align-items: center;
-  gap: clamp(4px, 0.5vw, 10px);
+  gap: clamp(9px, 0.9vw, 18px);
 }
 
 .voice-waveform i {
   display: block;
-  width: 100%;
+  width: min(9px, 100%);
   height: 100%;
   min-height: 100%;
+  justify-self: center;
   border-radius: 999px;
-  background: linear-gradient(180deg, rgba(19, 185, 160, 0.9), rgba(5, 154, 123, 0.98));
-  opacity: 0.48;
-  transform: scaleY(var(--level));
+  background: linear-gradient(180deg, rgba(12, 191, 160, 0.98), rgba(6, 164, 132, 0.98));
+  opacity: 0.82;
+  transform: scaleY(calc(0.025 + var(--level) * 0.975));
   transform-origin: center;
-  filter: drop-shadow(0 12px 8px rgba(10, 168, 137, 0.16));
+  box-shadow: 0 12px 20px rgba(10, 168, 137, 0.2);
   animation: wave-idle 1.8s ease-in-out infinite;
   animation-delay: var(--delay);
   transition: transform 100ms ease-out, opacity 100ms ease-out;
@@ -454,6 +458,7 @@ button:disabled {
   justify-self: center;
   gap: 10px;
   width: fit-content;
+  max-width: 100%;
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 10px 15px;
@@ -479,11 +484,16 @@ button:disabled {
   font-style: normal;
 }
 
+.listen-status span:last-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .result-flow {
   display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 16px;
-  align-items: stretch;
+  grid-template-columns: minmax(0, 0.92fr) auto minmax(0, 1fr);
+  gap: 18px;
+  align-items: center;
 }
 
 .source-text {
@@ -518,13 +528,13 @@ button:disabled {
 
 .live-transcript-panel {
   display: grid;
-  min-height: 210px;
+  min-height: 168px;
   align-content: start;
 }
 
 .live-transcript-panel .transcript-text,
 .live-transcript-panel .placeholder {
-  max-height: clamp(210px, 26vh, 340px);
+  max-height: clamp(128px, 18vh, 220px);
   overflow: auto;
   padding-right: 6px;
 }
@@ -543,7 +553,13 @@ button:disabled {
 }
 
 .polished-text-panel textarea {
-  min-height: 150px;
+  min-height: 128px;
+}
+
+.flow-arrow {
+  color: #8e9aac;
+  font-size: 34px;
+  line-height: 1;
 }
 
 .edited-card textarea::placeholder {
@@ -748,6 +764,13 @@ button:disabled {
   justify-content: space-between;
 }
 
+.memory-learned-notice {
+  margin: -4px 0 16px;
+  color: #5f6d83;
+  font-size: 15px;
+  line-height: 1.6;
+}
+
 .memory-modal .pane-heading button,
 .hotword-item button {
   display: grid;
@@ -848,11 +871,19 @@ button:disabled {
   }
 
   .app-shell {
-    width: min(100% - 36px, 1720px);
+    width: min(100% - 36px, 1500px);
   }
 
   .text-grid {
     grid-template-columns: 1fr;
+  }
+
+  .result-flow {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .flow-arrow {
+    display: none;
   }
 
   .insight-pane {
@@ -861,6 +892,14 @@ button:disabled {
     border-top: 1px solid var(--line);
     padding-top: 24px;
     padding-left: 0;
+  }
+
+  .cleanup-card {
+    grid-column: 1 / -1;
+  }
+
+  .insight-pane .toggle-stack {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
 }
@@ -916,7 +955,8 @@ button:disabled {
   }
 
   .app-shell {
-    width: min(100% - 20px, 1720px);
+    width: min(100% - 20px, 1500px);
+    row-gap: 14px;
     padding: 16px 0;
   }
 
@@ -977,12 +1017,13 @@ button:disabled {
   }
 
   .voice-console {
-    min-height: 210px;
+    min-height: 225px;
+    gap: 14px;
   }
 
   .voice-waveform {
-    height: 128px;
-    gap: 3px;
+    height: 120px;
+    gap: 6px;
   }
 
   .listen-status {
@@ -1020,6 +1061,10 @@ button:disabled {
   }
 
   .insight-pane {
+    grid-template-columns: 1fr;
+  }
+
+  .insight-pane .toggle-stack {
     grid-template-columns: 1fr;
   }
 }

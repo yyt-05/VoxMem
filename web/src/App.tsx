@@ -13,7 +13,6 @@
   Sparkles,
   Square,
   Trash2,
-  Undo2,
   X,
   Zap,
 } from 'lucide-react';
@@ -108,10 +107,15 @@ type MicDiagnostics = {
   channelCount?: number;
 };
 
+type FileTranscribeSentence = {
+  text: string;
+  speaker_id: number;
+};
+
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:8080';
 const targetSampleRate = 16000;
 const debugEnabled = import.meta.env.DEV;
-const waveBarCount = 64;
+const waveBarCount = 44;
 
 const cleanupOptions: Array<{ key: CleanupOptionKey; label: string }> = [
   { key: 'hotword', label: '\u4e13\u6709\u8bcd\u7ea0\u9519' },
@@ -155,8 +159,8 @@ const text = {
   correction: '\u63d0\u4ea4\u4fee\u6b63',
   correctionSaved: '\u4fee\u6b63\u5df2\u4fdd\u5b58',
   correctionUnchanged: '\u7f16\u8f91\u6700\u7ec8\u6587\u672c\u540e\u53ef\u63d0\u4ea4\u4fee\u6b63\u3002',
-  memoryLearned: '\u5df2\u8bb0\u4f4f\u672c\u5730\u66ff\u6362',
-  undo: '\u64a4\u9500',
+  memoryLearned: '\u5df2\u65b0\u589e\u70ed\u8bcd\u8bb0\u5f55',
+  memoryLearnedNotice: '\u4e0b\u6b21\u8bc6\u522b\u5230\u5de6\u4fa7\u8bcd\u65f6\u4f1a\u81ea\u52a8\u66ff\u6362\u4e3a\u53f3\u4fa7\u8bcd\uff0c\u5982\u679c\u4e0d\u9700\u8981\u53ef\u4ee5\u5728\u8fd9\u91cc\u5220\u9664\u3002',
   close: '\u5173\u95ed',
   hotwordMemory: '\u672c\u5730\u8bb0\u5fc6',
   noHotwords: '\u6682\u65e0\u672c\u5730\u66ff\u6362\u8bb0\u5fc6',
@@ -183,6 +187,7 @@ const text = {
 };
 
 function App() {
+  const [showIntro, setShowIntro] = useState(true);
   const [healthState, setHealthState] = useState<HealthState>('checking');
   const [health, setHealth] = useState<HealthPayload | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -220,7 +225,7 @@ function App() {
   const [voiceFilterMode, setVoiceFilterMode] = useState(false);
   const [voiceFilterLoading, setVoiceFilterLoading] = useState(false);
   const [voiceFilterResult, setVoiceFilterResult] = useState<{
-    sentences: { text: string; speaker_id: number }[];
+    sentences: FileTranscribeSentence[];
     speaker_count: number;
   } | null>(null);
   const audioBufferRef = useRef<Float32Array[]>([]);
@@ -242,6 +247,7 @@ function App() {
   const latestInputKeyRef = useRef('');
   const voiceBaselineRef = useRef(0);
   const voiceFrameCountRef = useRef(0);
+  const voiceFilterSampleRateRef = useRef(targetSampleRate);
   const filteredFrameCountRef = useRef(0);
 
   const statusLabel = useMemo(() => {
@@ -259,9 +265,8 @@ function App() {
   const originalTranscript = rawFinalText || liveText;
   const resultText = processedText || inputText || enhancedText;
   const displayedMappings = useMemo(() => {
-    const mappings = learnedMappings.length > 0 ? learnedMappings : hotwords;
-    return mappings.slice(0, 3);
-  }, [learnedMappings, hotwords]);
+    return learnedMappings.slice(0, 3);
+  }, [learnedMappings]);
 
   useEffect(() => {
     void checkHealth();
@@ -458,7 +463,7 @@ function App() {
     }
   }
 
-  async function undoLearnedMapping(id: number) {
+  async function deleteLearnedMapping(id: number) {
     await deleteHotword(id);
     setLearnedMappings((mappings) => {
       const next = mappings.filter((mapping) => mapping.id !== id);
@@ -697,8 +702,17 @@ function App() {
       }
 
       setLiveText('Voice filter: encoding WAV...');
-      const wav = encodeWAV(combined, targetSampleRate);
-      debugLog('voice filter: wav encoded', { wavBytes: wav.byteLength, sampleRate: targetSampleRate, durationS: (totalLength / targetSampleRate).toFixed(1) });
+      const inputSampleRate = voiceFilterSampleRateRef.current || targetSampleRate;
+      const downsampled = downsample(combined, inputSampleRate, targetSampleRate);
+      const wav = encodeWAV(downsampled, targetSampleRate);
+      debugLog('voice filter: wav encoded', {
+        inputSampleRate,
+        outputSampleRate: targetSampleRate,
+        inputSamples: combined.length,
+        outputSamples: downsampled.length,
+        wavBytes: wav.byteLength,
+        durationS: (downsampled.length / targetSampleRate).toFixed(1),
+      });
 
       setLiveText('Voice filter: uploading audio...');
       const response = await fetch(apiBaseUrl + '/api/transcribe/file', {
@@ -707,7 +721,7 @@ function App() {
       });
       debugLog('voice filter: upload response', { status: response.status });
       const payload = (await response.json()) as {
-        sentences?: { text: string; speaker_id: number }[];
+        sentences?: FileTranscribeSentence[];
         full_text?: string;
         speaker_count?: number;
         error?: string;
@@ -717,14 +731,19 @@ function App() {
       }
 
       debugLog('voice filter: result', { sentences: payload.sentences?.length, speakers: payload.speaker_count });
+      const sentences = payload.sentences || [];
       setVoiceFilterResult({
-        sentences: payload.sentences || [],
+        sentences,
         speaker_count: payload.speaker_count || 0,
       });
-      const fullText = payload.full_text || '';
-      setRawFinalText(fullText);
-      setInputText(fullText);
-      setLiveText(fullText);
+      const firstSpeakerID = firstSpeakerIDFromSentences(sentences);
+      const userText = firstSpeakerID === null
+        ? (payload.full_text || '')
+        : textForSpeaker(sentences, firstSpeakerID);
+      setSelectedSpeaker(firstSpeakerID === null ? 'all' : String(firstSpeakerID));
+      setRawFinalText(userText);
+      setInputText(userText);
+      setLiveText(userText);
     } catch (err) {
       debugLog('voice filter: failed', err instanceof Error ? err.message : err);
       setError(err instanceof Error ? err.message : String(err));
@@ -747,6 +766,7 @@ function App() {
     const audioContext = audioContextRef.current ?? createAudioContext();
     audioContextRef.current = audioContext;
     void audioContext.resume();
+    voiceFilterSampleRateRef.current = audioContext.sampleRate;
     const source = audioContext.createMediaStreamSource(mediaStream);
     const processor = audioContext.createScriptProcessor(4096, 1, 1);
 
@@ -761,7 +781,7 @@ function App() {
     sourceRef.current = source;
     processorRef.current = processor;
     setRecordingStateSafe('recording');
-    debugLog('voice filter recording started');
+    debugLog('voice filter recording started', { inputSampleRate: audioContext.sampleRate, targetSampleRate });
   }
 
   function startAudioProcessing(mediaStream: MediaStream, ws: WebSocket) {
@@ -907,6 +927,85 @@ function App() {
     }
   }
 
+  if (showIntro) {
+    return (
+      <main className="intro-shell">
+        <div className="intro-hero">
+          <div className="intro-copy">
+            <span className="intro-kicker">VoxMem</span>
+            <h1>语音记忆输入台</h1>
+            <p>
+              轻量级语音输入工作区 —— 实时语音识别、智能文本整理、个人记忆纠错，让每一次口述都精准高效。
+            </p>
+            <div className="intro-actions">
+              <button type="button" className="intro-primary" onClick={() => setShowIntro(false)}>
+                开始体验
+                <Send size={20} aria-hidden="true" />
+              </button>
+              <span>无需登录，打开即用。支持 Chrome / Edge / Firefox。</span>
+            </div>
+          </div>
+
+          <div className="intro-product">
+            <div className="intro-console">
+              <div className="intro-console-top">
+                <span className="intro-status-dot" />
+                <strong>实时 ASR</strong>
+                <em>&middot;</em>
+                <span>Paraformer 流式识别</span>
+              </div>
+              <div className="intro-waveform">
+                {Array.from({ length: 64 }, (_, i) => (
+                  <i
+                    key={i}
+                    style={{
+                      '--level': `${0.15 + Math.sin(i * 0.32) * 0.2 + Math.cos(i * 0.18) * 0.15 + Math.random() * 0.1}`,
+                      '--delay': `${i * 28}ms`,
+                    } as CSSProperties}
+                  />
+                ))}
+              </div>
+            </div>
+
+            <div className="intro-transform">
+              <section>
+                <span>原始转写</span>
+                <p>今天星期一，不对，今天是星期二，那个张力要同步熔断机制...</p>
+              </section>
+              <section>
+                <span>智能整理后</span>
+                <p>今天是星期二。张力需要同步熔断机制。</p>
+              </section>
+            </div>
+
+            <div className="intro-capabilities">
+              <article>
+                <Mic size={26} aria-hidden="true" />
+                <h2>实时语音识别</h2>
+                <p>浏览器端麦克风采集，WebSocket 流式传输，Paraformer 实时转写。</p>
+              </article>
+              <article>
+                <Sparkles size={26} aria-hidden="true" />
+                <h2>LLM 智能整理</h2>
+                <p>口语修正、填充词去除、段落优化、Markdown 格式化。</p>
+              </article>
+              <article>
+                <Brain size={26} aria-hidden="true" />
+                <h2>个人记忆纠错</h2>
+                <p>自动学习你的专属词汇替换，越用越准。</p>
+              </article>
+              <article>
+                <Zap size={26} aria-hidden="true" />
+                <h2>开箱即用</h2>
+                <p>无需注册、无需登录，打开浏览器即可开始语音输入。</p>
+              </article>
+            </div>
+          </div>
+        </div>
+      </main>
+    );
+  }
+
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -992,6 +1091,7 @@ function App() {
                   {liveText || '\u4eca\u5929\u662f\u661f\u671f\u4e00\uff0c\u4e0d\u5bf9\uff0c\u4eca\u5929\u662f\u661f\u671f\u4e8c\uff0c\n\u7136\u540e\u90a3\u4e2a\u5f20\u529b\u8981\u540c\u6b65\u7194\u65ad\u673a\u5236...'}
                 </p>
               </section>
+              <span className="flow-arrow" aria-hidden="true">{'\u2192'}</span>
               <section className="source-text edited-card polished-text-panel">
                 <div className="card-title">
                   <Sparkles size={18} aria-hidden="true" />
@@ -1106,11 +1206,11 @@ function App() {
           </section>
 
           <aside className="text-pane insight-pane">
-            <section className="memory-hit-card">
-              <div className="pane-heading">
-                <h2><Brain size={18} aria-hidden="true" />{'\u4e2a\u4eba\u8bb0\u5fc6\u547d\u4e2d'}</h2>
-              </div>
-              {displayedMappings.length > 0 ? (
+            {displayedMappings.length > 0 ? (
+              <section className="memory-hit-card">
+                <div className="pane-heading">
+                  <h2><Brain size={18} aria-hidden="true" />{'\u4e2a\u4eba\u8bb0\u5fc6\u547d\u4e2d'}</h2>
+                </div>
                 <div className="memory-hit-list">
                   {displayedMappings.map((mapping, index) => (
                     <div className="memory-hit" key={mapping.id}>
@@ -1121,20 +1221,7 @@ function App() {
                     </div>
                   ))}
                 </div>
-              ) : (
-                <div className="memory-hit-list">
-                  <div className="memory-hit"><span>{'\u5f20\u529b'}</span><i aria-hidden="true">{'\u2192'}</i><strong>{'\u5f20\u7acb'}</strong></div>
-                  <div className="memory-hit"><span>{'\u8fd1\u4f3c\u8868\u8fbe'}</span><i aria-hidden="true">{'\u2192'}</i><strong>{'\u7194\u65ad\u673a\u5236'}</strong></div>
-                  <div className="memory-hit"><span>{'\u9879\u76ee\u540d'}</span><i aria-hidden="true">{'\u2192'}</i><strong>VoxMem</strong></div>
-                </div>
-              )}
-            </section>
-
-            {rawFinalText ? (
-              <div className="source-text compact-source">
-                <span>{text.rawFinal}</span>
-                <p>{rawFinalText}</p>
-              </div>
+              </section>
             ) : null}
             {enhancedText && enhancedText !== rawFinalText ? (
               <div className="source-text compact-source">
@@ -1175,6 +1262,7 @@ function App() {
                 <X size={16} aria-hidden="true" />
               </button>
             </div>
+            <p className="memory-learned-notice">{text.memoryLearnedNotice}</p>
             <div className="hotword-list">
               {learnedMappings.map((mapping) => (
                 <div className="hotword-item" key={mapping.id}>
@@ -1186,11 +1274,11 @@ function App() {
                   </div>
                   <button
                     type="button"
-                    title={text.undo}
-                    aria-label={text.undo}
-                    onClick={() => void undoLearnedMapping(mapping.id)}
+                    title={text.deleteHotword}
+                    aria-label={text.deleteHotword}
+                    onClick={() => void deleteLearnedMapping(mapping.id)}
                   >
-                    <Undo2 size={16} aria-hidden="true" />
+                    <Trash2 size={16} aria-hidden="true" />
                   </button>
                 </div>
               ))}
@@ -1312,10 +1400,22 @@ function createSilentWave() {
 function createPreviewWave() {
   return Array.from({ length: waveBarCount }, (_, index) => {
     const centerDistance = Math.abs(index - (waveBarCount - 1) / 2) / (waveBarCount / 2);
-    const envelope = Math.max(0.18, 1 - centerDistance * 0.74);
-    const pulse = Math.abs(Math.sin(index * 0.54)) * 0.42 + Math.abs(Math.cos(index * 0.23)) * 0.26;
-    return Math.min(1, envelope * (0.2 + pulse));
+    const envelope = Math.max(0.02, 1 - Math.pow(centerDistance, 1.85));
+    const pulse = Math.abs(Math.sin(index * 0.9)) * 0.5 + Math.abs(Math.cos(index * 0.41)) * 0.2;
+    const centerBoost = Math.exp(-centerDistance * centerDistance * 10) * 0.34;
+    return Math.min(1, envelope * (0.06 + pulse) + centerBoost);
   });
+}
+
+function firstSpeakerIDFromSentences(sentences: FileTranscribeSentence[]) {
+  return sentences.length > 0 ? sentences[0].speaker_id : null;
+}
+
+function textForSpeaker(sentences: FileTranscribeSentence[], speakerID: number) {
+  return sentences
+    .filter((sentence) => sentence.speaker_id === speakerID)
+    .map((sentence) => sentence.text)
+    .join('');
 }
 
 function memoryKindLabel(index: number) {
