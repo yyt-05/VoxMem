@@ -43,6 +43,14 @@ type ProbeResult struct {
 	AudioDuration time.Duration
 }
 
+type Stream struct {
+	taskID  string
+	conn    *websocket.Conn
+	events  <-chan ServerEvent
+	errCh   <-chan error
+	closeFn func()
+}
+
 type ServerEvent struct {
 	Header  EventHeader     `json:"header"`
 	Payload json.RawMessage `json:"payload,omitempty"`
@@ -166,6 +174,77 @@ func RecognizeFile(ctx context.Context, cfg Config, audioPath string) (*ProbeRes
 	return result, nil
 }
 
+func OpenStream(ctx context.Context, cfg Config) (*Stream, *ProbeResult, error) {
+	cfg, err := cfg.withDefaults()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	conn, events, errCh, closeFn, err := connect(ctx, cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	taskID := uuid.NewString()
+	result := &ProbeResult{TaskID: taskID}
+	if err := writeJSONMessage(conn, runTaskMessage(taskID, cfg)); err != nil {
+		closeFn()
+		return nil, result, fmt.Errorf("send run-task: %w", err)
+	}
+	if err := waitForStarted(ctx, events, errCh, result); err != nil {
+		closeFn()
+		return nil, result, err
+	}
+
+	return &Stream{
+		taskID:  taskID,
+		conn:    conn,
+		events:  events,
+		errCh:   errCh,
+		closeFn: closeFn,
+	}, result, nil
+}
+
+func (s *Stream) TaskID() string {
+	return s.taskID
+}
+
+func (s *Stream) Events() <-chan ServerEvent {
+	return s.events
+}
+
+func (s *Stream) Errors() <-chan error {
+	return s.errCh
+}
+
+func (s *Stream) SendAudio(data []byte) error {
+	if len(data) == 0 {
+		return nil
+	}
+	return s.conn.WriteMessage(websocket.BinaryMessage, data)
+}
+
+func (s *Stream) Finish() error {
+	return writeJSONMessage(s.conn, finishTaskMessage(s.taskID))
+}
+
+func (s *Stream) Close() {
+	s.closeFn()
+}
+
+func ExtractSentence(event ServerEvent) (text string, sentenceEnd bool) {
+	if event.Header.Event != "result-generated" {
+		return "", false
+	}
+
+	var recognition recognitionEvent
+	if err := json.Unmarshal([]byte(event.Raw), &recognition); err != nil {
+		return "", false
+	}
+
+	return strings.TrimSpace(recognition.Payload.Output.Sentence.Text), recognition.Payload.Output.Sentence.SentenceEnd
+}
+
 func connect(ctx context.Context, cfg Config) (*websocket.Conn, <-chan ServerEvent, <-chan error, func(), error) {
 	headers := http.Header{}
 	headers.Set("Authorization", "Bearer "+cfg.APIKey)
@@ -275,13 +354,8 @@ func appendEvent(result *ProbeResult, event ServerEvent) {
 		return
 	}
 
-	var recognition recognitionEvent
-	if err := json.Unmarshal([]byte(event.Raw), &recognition); err != nil {
-		return
-	}
-
-	text := strings.TrimSpace(recognition.Payload.Output.Sentence.Text)
-	if text != "" && recognition.Payload.Output.Sentence.SentenceEnd {
+	text, sentenceEnd := ExtractSentence(event)
+	if text != "" && sentenceEnd {
 		if result.FinalText != "" {
 			result.FinalText += "\n"
 		}
