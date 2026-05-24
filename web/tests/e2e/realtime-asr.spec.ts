@@ -9,9 +9,10 @@ const zh = {
   runtimeStatus: '\u8fd0\u884c\u72b6\u6001',
   stop: '\u505c\u6b62',
   completed: '\u5df2\u5b8c\u6210',
-  finalOutputText: '\u6700\u7ec8\u8f93\u51fa\u6587\u672c',
+  inputText: '\u8f93\u5165\u6587\u672c',
   errorPrefix: '\u9519\u8bef\uff1a',
   voiceWave: '\u97f3\u6ce2',
+  raw: '\u539f\u58f0',
 };
 
 const audioDebugDir = path.resolve('../tmp/e2e-audio-debug');
@@ -31,6 +32,7 @@ test('runs the mock realtime ASR recording flow', async ({ page, context }) => {
 
   await expect(page.getByText(zh.apiConnected)).toBeVisible();
   await expect(page.getByText('voxmem-api')).toBeVisible();
+  await page.getByRole('button', { name: zh.raw }).click();
 
   const startButton = page.getByRole('button', { name: zh.start });
   await expect(startButton).toBeEnabled();
@@ -48,7 +50,7 @@ test('runs the mock realtime ASR recording flow', async ({ page, context }) => {
   await stopButton.click();
 
   await expect(page.getByLabel(zh.runtimeStatus).getByText(zh.completed)).toBeVisible();
-  await expect(page.getByLabel(zh.finalOutputText)).toHaveValue(/mock final text/);
+  await expect(page.getByLabel(zh.inputText)).toHaveValue(/mock final text/);
   await expect(page.getByText(zh.errorPrefix)).toHaveCount(0);
   await expect.poll(async () => {
     const files = await readdir(audioDebugDir);

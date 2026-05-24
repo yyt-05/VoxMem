@@ -1,4 +1,4 @@
-import { Mic, RefreshCw, Server, Square } from 'lucide-react';
+import { Mic, RefreshCw, Send, Server, Square, Trash2, Undo2, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 
 declare global {
@@ -9,6 +9,8 @@ declare global {
 
 type HealthState = 'checking' | 'ok' | 'error';
 type RecordingState = 'idle' | 'connecting' | 'recording' | 'stopping' | 'completed' | 'error';
+type OutputMode = 'polish' | 'raw' | 'markdown';
+type ProcessingState = 'idle' | 'processing' | 'completed' | 'failed';
 
 type HealthPayload = {
   status: string;
@@ -18,11 +20,47 @@ type HealthPayload = {
 };
 
 type ASRMessage = {
-  type: 'ready' | 'transcript' | 'done' | 'error';
+  type: 'ready' | 'transcript' | 'input_ready' | 'processing' | 'processed' | 'done' | 'error';
   task_id?: string;
   text?: string;
   final?: boolean;
   message?: string;
+  mode?: OutputMode;
+  status?: string;
+  source?: string;
+  latency_ms?: number;
+  original_text?: string;
+  enhanced_text?: string;
+  mappings?: HotwordMapping[];
+};
+
+type HotwordMapping = {
+  id: number;
+  from_text: string;
+  to_text: string;
+  correction_count: number;
+  hit_count: number;
+};
+
+type HotwordsResponse = {
+  mappings?: HotwordMapping[];
+  error?: string;
+};
+
+type CorrectionResponse = {
+  status: string;
+  mappings?: HotwordMapping[];
+  error?: string;
+};
+
+type InputCommitResponse = {
+  status: string;
+  text: string;
+  mode: OutputMode;
+  source: string;
+  latency_ms: number;
+  mappings?: HotwordMapping[];
+  error?: string;
 };
 
 type RecorderStats = {
@@ -62,9 +100,30 @@ const text = {
   realtimeTranscript: '\u5b9e\u65f6\u8bc6\u522b',
   realtimePlaceholder: '\u70b9\u51fb\u5f00\u59cb\u5e76\u8bf4\u8bdd\uff0c\u5b9e\u65f6\u8bc6\u522b\u6587\u672c\u4f1a\u663e\u793a\u5728\u8fd9\u91cc\u3002',
   finalOutput: '\u6700\u7ec8\u8f93\u51fa',
-  finalOutputAria: '\u6700\u7ec8\u8f93\u51fa\u6587\u672c',
+  inputText: '\u8f93\u5165\u6587\u672c',
+  inputTextAria: '\u8f93\u5165\u6587\u672c',
+  processedOutput: '\u5904\u7406\u7ed3\u679c',
   finalPlaceholder:
-    '\u505c\u6b62\u5f55\u97f3\u540e\uff0c\u6700\u7ec8\u8bc6\u522b\u6587\u672c\u4f1a\u663e\u793a\u5728\u8fd9\u91cc\u3002LLM \u6574\u7406\u548c\u672c\u5730\u70ed\u8bcd\u8bb0\u5fc6\u5c06\u5728\u540e\u7eed\u9636\u6bb5\u63a5\u5165\u3002',
+    '\u505c\u6b62\u5f55\u97f3\u540e\uff0c\u6309\u5f53\u524d\u6a21\u5f0f\u5904\u7406\u7684\u6700\u7ec8\u6587\u672c\u4f1a\u663e\u793a\u5728\u8fd9\u91cc\u3002',
+  inputPlaceholder:
+    '\u505c\u6b62\u5f55\u97f3\u540e\uff0c\u672c\u5730\u8bb0\u5fc6\u66ff\u6362\u540e\u7684\u53ef\u7f16\u8f91\u6587\u672c\u4f1a\u663e\u793a\u5728\u8fd9\u91cc\u3002',
+  rawFinal: '\u539f\u59cb\u8bc6\u522b',
+  enhancedFinal: '\u672c\u5730\u66ff\u6362\u540e',
+  processing: 'LLM \u5904\u7406\u4e2d',
+  processedBy: '\u5904\u7406\u6765\u6e90',
+  send: '\u53d1\u9001',
+  autoWaiting: '\u7f16\u8f91\u5b8c\u6210\u540e\u70b9\u51fb\u7a7a\u767d\u5904\u6216\u6309\u53d1\u9001\u63d0\u4ea4',
+  autoProcessing: '\u5904\u7406\u4e2d',
+  autoProcessed: '\u5df2\u5904\u7406',
+  correction: '\u63d0\u4ea4\u4fee\u6b63',
+  correctionSaved: '\u4fee\u6b63\u5df2\u4fdd\u5b58',
+  correctionUnchanged: '\u7f16\u8f91\u6700\u7ec8\u6587\u672c\u540e\u53ef\u63d0\u4ea4\u4fee\u6b63\u3002',
+  memoryLearned: '\u5df2\u8bb0\u4f4f\u672c\u5730\u66ff\u6362',
+  undo: '\u64a4\u9500',
+  close: '\u5173\u95ed',
+  hotwordMemory: '\u672c\u5730\u8bb0\u5fc6',
+  noHotwords: '\u6682\u65e0\u672c\u5730\u66ff\u6362\u8bb0\u5fc6',
+  deleteHotword: '\u5220\u9664\u672c\u5730\u66ff\u6362',
   runtimeStatus: '\u8fd0\u884c\u72b6\u6001',
   service: '\u670d\u52a1',
   offline: '\u79bb\u7ebf',
@@ -90,10 +149,22 @@ function App() {
   const [healthState, setHealthState] = useState<HealthState>('checking');
   const [health, setHealth] = useState<HealthPayload | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [mode, setMode] = useState<'polish' | 'raw' | 'markdown'>('polish');
+  const [mode, setMode] = useState<OutputMode>('polish');
   const [recordingState, setRecordingState] = useState<RecordingState>('idle');
   const [liveText, setLiveText] = useState('');
-  const [finalText, setFinalText] = useState('');
+  const [inputText, setInputText] = useState('');
+  const [inputBaseline, setInputBaseline] = useState('');
+  const [processedText, setProcessedText] = useState('');
+  const [rawFinalText, setRawFinalText] = useState('');
+  const [enhancedText, setEnhancedText] = useState('');
+  const [processingState, setProcessingState] = useState<ProcessingState>('idle');
+  const [processingSource, setProcessingSource] = useState('');
+  const [processingLatencyMS, setProcessingLatencyMS] = useState<number | null>(null);
+  const [commitMessage, setCommitMessage] = useState('');
+  const [learnedMappings, setLearnedMappings] = useState<HotwordMapping[]>([]);
+  const [memoryDialogOpen, setMemoryDialogOpen] = useState(false);
+  const [hotwords, setHotwords] = useState<HotwordMapping[]>([]);
+  const [userID] = useState(() => getUserID());
   const [taskId, setTaskId] = useState<string | null>(null);
   const [recorderStats, setRecorderStats] = useState<RecorderStats>({ frames: 0, bytes: 0, level: 0, peakLevel: 0 });
   const [waveLevels, setWaveLevels] = useState<number[]>(() => createSilentWave());
@@ -108,6 +179,10 @@ function App() {
   const processorRef = useRef<ScriptProcessorNode | null>(null);
   const recordingStateRef = useRef<RecordingState>('idle');
   const finalSegmentsRef = useRef<string[]>([]);
+  const commitSeqRef = useRef(0);
+  const lastCommittedKeyRef = useRef('');
+  const inFlightCommitKeyRef = useRef<string | null>(null);
+  const latestInputKeyRef = useRef('');
 
   const statusLabel = useMemo(() => {
     if (healthState === 'ok') return text.apiConnected;
@@ -118,10 +193,12 @@ function App() {
   const isRecordingActive = ['connecting', 'recording', 'stopping'].includes(recordingState);
   const canUseRecordButton = healthState === 'ok' && !['connecting', 'stopping'].includes(recordingState);
   const micLooksSilent = recordingState === 'recording' && recorderStats.frames > 20 && recorderStats.peakLevel < 0.001;
+  const canSendInput = inputText.trim() !== '' && processingState !== 'processing';
 
   useEffect(() => {
     void checkHealth();
     void refreshAudioDevices();
+    void loadHotwords();
 
     return () => {
       cleanupAudio();
@@ -168,14 +245,154 @@ function App() {
     }
   }
 
+  async function loadHotwords() {
+    try {
+      const response = await fetch(`${apiBaseUrl}/api/hotwords?user_id=${encodeURIComponent(userID)}`);
+      const payload = (await response.json()) as HotwordsResponse;
+      if (!response.ok) {
+        throw new Error(payload.error || `HTTP ${response.status}`);
+      }
+      setHotwords(payload.mappings ?? []);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function sendInputNow() {
+    if (!inputText.trim()) {
+      return;
+    }
+    const commitKey = createCommitKey(mode, rawFinalText, enhancedText, inputText);
+    latestInputKeyRef.current = commitKey;
+    await commitInput(commitKey, true);
+  }
+
+  function handleInputBlur() {
+    if (!inputText.trim()) {
+      return;
+    }
+    const commitKey = createCommitKey(mode, rawFinalText, enhancedText, inputText);
+    if (commitKey === lastCommittedKeyRef.current || commitKey === inFlightCommitKeyRef.current) {
+      return;
+    }
+    void commitInput(commitKey);
+  }
+
+  async function commitInput(commitKey: string, force = false) {
+    if (!inputText.trim()) {
+      return;
+    }
+    if (!force && (commitKey === lastCommittedKeyRef.current || commitKey === inFlightCommitKeyRef.current)) {
+      return;
+    }
+
+    const requestID = crypto.randomUUID();
+    const requestSeq = commitSeqRef.current + 1;
+    commitSeqRef.current = requestSeq;
+    inFlightCommitKeyRef.current = commitKey;
+    setProcessingState('processing');
+    setCommitMessage(text.autoProcessing);
+    setError(null);
+
+    try {
+      const response = await fetch(`${apiBaseUrl}/api/input/commit`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          user_id: userID,
+          session_id: taskId,
+          mode,
+          original_text: rawFinalText,
+          enhanced_text: enhancedText || inputBaseline,
+          final_text: inputText,
+          request_id: requestID,
+        }),
+      });
+      const payload = (await response.json()) as InputCommitResponse;
+      if (!response.ok) {
+        throw new Error(payload.error || `HTTP ${response.status}`);
+      }
+      if (requestSeq !== commitSeqRef.current || commitKey !== latestInputKeyRef.current) {
+        setProcessingState('idle');
+        return;
+      }
+
+      lastCommittedKeyRef.current = commitKey;
+      setProcessingState('completed');
+      setProcessedText(payload.text ?? '');
+      setProcessingSource(payload.source ?? '');
+      setProcessingLatencyMS(payload.latency_ms ?? null);
+      setCommitMessage(`${text.autoProcessed}${payload.mappings?.length ? `\uff0c${payload.mappings.length} \u6761\u66ff\u6362` : ''}`);
+      if (payload.mappings?.length) {
+        setLearnedMappings(payload.mappings);
+        setMemoryDialogOpen(true);
+        await loadHotwords();
+      }
+    } catch (err) {
+      if (requestSeq !== commitSeqRef.current || commitKey !== latestInputKeyRef.current) {
+        setProcessingState('idle');
+        return;
+      }
+      setProcessingState('failed');
+      const message = err instanceof Error ? err.message : String(err);
+      setCommitMessage(message);
+      setError(message);
+    } finally {
+      if (inFlightCommitKeyRef.current === commitKey) {
+        inFlightCommitKeyRef.current = null;
+      }
+    }
+  }
+
+  async function deleteHotword(id: number) {
+    setError(null);
+    try {
+      const response = await fetch(`${apiBaseUrl}/api/hotwords/${id}?user_id=${encodeURIComponent(userID)}`, {
+        method: 'DELETE',
+      });
+      const payload = (await response.json()) as { error?: string };
+      if (!response.ok) {
+        throw new Error(payload.error || `HTTP ${response.status}`);
+      }
+      await loadHotwords();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function undoLearnedMapping(id: number) {
+    await deleteHotword(id);
+    setLearnedMappings((mappings) => {
+      const next = mappings.filter((mapping) => mapping.id !== id);
+      if (next.length === 0) {
+        setMemoryDialogOpen(false);
+      }
+      return next;
+    });
+  }
+
   async function startRecording() {
     setError(null);
     setLiveText('');
-    setFinalText('');
+    setInputText('');
+    setInputBaseline('');
+    setProcessedText('');
+    setRawFinalText('');
+    setEnhancedText('');
+    setProcessingState('idle');
+    setProcessingSource('');
+    setProcessingLatencyMS(null);
+    setCommitMessage('');
+    setLearnedMappings([]);
+    setMemoryDialogOpen(false);
     setTaskId(null);
     setRecorderStats({ frames: 0, bytes: 0, level: 0, peakLevel: 0 });
     setWaveLevels(createSilentWave());
     finalSegmentsRef.current = [];
+    commitSeqRef.current += 1;
+    lastCommittedKeyRef.current = '';
+    inFlightCommitKeyRef.current = null;
+    latestInputKeyRef.current = '';
     setRecordingStateSafe('connecting');
 
     try {
@@ -189,7 +406,9 @@ function App() {
       audioContextRef.current = audioContext;
       debugLog('audio context prepared', { state: audioContext.state, sampleRate: audioContext.sampleRate });
 
-      const ws = new WebSocket(`${toWebSocketBase(apiBaseUrl)}/ws/asr?user_id=${encodeURIComponent(getUserID())}`);
+      const ws = new WebSocket(
+        `${toWebSocketBase(apiBaseUrl)}/ws/asr?user_id=${encodeURIComponent(userID)}&mode=${encodeURIComponent(mode)}`,
+      );
       ws.binaryType = 'arraybuffer';
       wsRef.current = ws;
 
@@ -237,10 +456,53 @@ function App() {
       if (message.final) {
         finalSegmentsRef.current = [...finalSegmentsRef.current, message.text];
         const joined = finalSegmentsRef.current.join('');
-        setFinalText(joined);
+        setRawFinalText(joined);
         setLiveText(joined);
       } else {
         setLiveText(`${finalSegmentsRef.current.join('')}${message.text}`);
+      }
+      return;
+    }
+
+    if (message.type === 'processing') {
+      setProcessingState('processing');
+      setRawFinalText(message.original_text ?? rawFinalText);
+      setEnhancedText(message.enhanced_text ?? '');
+      return;
+    }
+
+    if (message.type === 'input_ready') {
+      const original = message.original_text ?? rawFinalText;
+      const enhanced = message.enhanced_text ?? message.text ?? original;
+      const input = message.text ?? enhanced;
+      setRawFinalText(original);
+      setEnhancedText(enhanced);
+      setInputBaseline(enhanced);
+      setInputText(input);
+      setProcessedText('');
+      setProcessingState('idle');
+      setProcessingSource('');
+      setProcessingLatencyMS(null);
+      setCommitMessage(text.autoWaiting);
+      if (message.mappings?.length) {
+        void loadHotwords();
+      }
+      return;
+    }
+
+    if (message.type === 'processed') {
+      const output = message.text ?? '';
+      setProcessingState('completed');
+      setProcessingSource(message.source ?? '');
+      setProcessingLatencyMS(message.latency_ms ?? null);
+      setRawFinalText(message.original_text ?? rawFinalText);
+      setEnhancedText(message.enhanced_text ?? '');
+      setInputBaseline(message.enhanced_text ?? output);
+      setInputText(output);
+      setProcessedText(output);
+      setCommitMessage(text.autoProcessed);
+      if (message.mappings?.length) {
+        void loadHotwords();
       }
       return;
     }
@@ -255,6 +517,11 @@ function App() {
 
     if (message.type === 'error') {
       setError(message.message ?? text.asrFailed);
+      if (message.source === 'llm') {
+        setProcessingState('failed');
+      }
+      setRawFinalText(message.original_text ?? rawFinalText);
+      setEnhancedText(message.enhanced_text ?? enhancedText);
       cleanupAudio();
       setWaveLevels(createSilentWave());
       ws.close();
@@ -387,6 +654,7 @@ function App() {
                 key={value}
                 className={mode === value ? 'active' : ''}
                 type="button"
+                disabled={isRecordingActive}
                 onClick={() => setMode(value as typeof mode)}
               >
                 {label}
@@ -442,18 +710,96 @@ function App() {
 
           <section className="text-pane">
             <div className="pane-heading">
-              <h2>{text.finalOutput}</h2>
-              <span>{mode === 'markdown' ? 'Markdown' : mode === 'raw' ? text.raw : text.polish}</span>
+              <h2>{text.inputText}</h2>
+              <span>
+                {processingState === 'processing'
+                  ? text.autoProcessing
+                  : mode === 'markdown'
+                    ? 'Markdown'
+                    : mode === 'raw'
+                      ? text.raw
+                      : text.polish}
+              </span>
             </div>
+            {rawFinalText ? (
+              <div className="source-text">
+                <span>{text.rawFinal}</span>
+                <p>{rawFinalText}</p>
+              </div>
+            ) : null}
+            {enhancedText && enhancedText !== rawFinalText ? (
+              <div className="source-text">
+                <span>{text.enhancedFinal}</span>
+                <p>{enhancedText}</p>
+              </div>
+            ) : null}
             <textarea
-              aria-label={text.finalOutputAria}
-              value={finalText}
-              onChange={(event) => setFinalText(event.target.value)}
-              placeholder={text.finalPlaceholder}
+              aria-label={text.inputTextAria}
+              value={inputText}
+              onChange={(event) => {
+                setInputText(event.target.value);
+                setProcessedText('');
+                setProcessingSource('');
+                setProcessingLatencyMS(null);
+              }}
+              onBlur={handleInputBlur}
+              placeholder={text.inputPlaceholder}
               rows={8}
             />
+            <div className="correction-row">
+              <button type="button" onClick={() => void sendInputNow()} disabled={!canSendInput}>
+                <Send size={16} aria-hidden="true" />
+                <span>{text.send}</span>
+              </button>
+              <span className={processingState === 'failed' ? 'correction-error' : ''}>
+                {commitMessage || (inputText ? text.autoWaiting : text.inputPlaceholder)}
+              </span>
+            </div>
+            {processedText ? (
+              <div className="source-text processed-output">
+                <span>{text.processedOutput}</span>
+                <p>{processedText}</p>
+              </div>
+            ) : null}
+            {processingSource ? (
+              <p className="processing-meta">
+                {text.processedBy}: {processingSource}
+                {processingLatencyMS !== null ? ` / ${processingLatencyMS}ms` : ''}
+              </p>
+            ) : null}
           </section>
         </div>
+      </section>
+
+      <section className="hotword-panel" aria-label={text.hotwordMemory}>
+        <div className="pane-heading">
+          <h2>{text.hotwordMemory}</h2>
+          <span>{hotwords.length}</span>
+        </div>
+        {hotwords.length === 0 ? (
+          <p className="placeholder">{text.noHotwords}</p>
+        ) : (
+          <div className="hotword-list">
+            {hotwords.map((mapping) => (
+              <div className="hotword-item" key={mapping.id}>
+                <div>
+                  <strong>{mapping.from_text} {'->'} {mapping.to_text}</strong>
+                  <span>
+                    {mapping.correction_count} / {mapping.hit_count}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  title={text.deleteHotword}
+                  aria-label={text.deleteHotword}
+                  onClick={() => void deleteHotword(mapping.id)}
+                >
+                  <Trash2 size={16} aria-hidden="true" />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
       </section>
 
       <section className="diagnostics" aria-label={text.runtimeStatus}>
@@ -504,6 +850,39 @@ function App() {
           {micLooksSilent ? <strong className="wave-warning">{text.micSilent}</strong> : null}
         </div>
       </section>
+
+      {memoryDialogOpen && learnedMappings.length > 0 ? (
+        <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label={text.memoryLearned}>
+          <div className="memory-modal">
+            <div className="pane-heading">
+              <h2>{text.memoryLearned}</h2>
+              <button type="button" aria-label={text.close} title={text.close} onClick={() => setMemoryDialogOpen(false)}>
+                <X size={16} aria-hidden="true" />
+              </button>
+            </div>
+            <div className="hotword-list">
+              {learnedMappings.map((mapping) => (
+                <div className="hotword-item" key={mapping.id}>
+                  <div>
+                    <strong>{mapping.from_text} {'->'} {mapping.to_text}</strong>
+                    <span>
+                      {mapping.correction_count} / {mapping.hit_count}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    title={text.undo}
+                    aria-label={text.undo}
+                    onClick={() => void undoLearnedMapping(mapping.id)}
+                  >
+                    <Undo2 size={16} aria-hidden="true" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {error ? <p className="error-banner">{text.errorPrefix}{error}</p> : null}
     </main>
@@ -610,6 +989,10 @@ function toWebSocketBase(httpBase: string) {
   const url = new URL(httpBase);
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
   return url.origin;
+}
+
+function createCommitKey(mode: OutputMode, originalText: string, enhancedText: string, inputText: string) {
+  return [mode, originalText.trim(), enhancedText.trim(), inputText.trim()].join('\u0000');
 }
 
 function getUserID() {

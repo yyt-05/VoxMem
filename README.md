@@ -2,7 +2,7 @@
 
 VoxMem is a lightweight voice input workspace for fast ASR, conservative LLM text cleanup, and user-level correction memory.
 
-The current implementation includes a React workbench, Go API health checks, browser microphone capture, realtime WebSocket ASR streaming, and a deterministic mock ASR mode for E2E tests. LLM post-processing, SQLite memory, and deployment are implemented in later phases.
+The current implementation includes a React workbench, Go API health checks, browser microphone capture, realtime WebSocket ASR streaming, OpenAI-compatible LLM post-processing, SQLite-backed local correction memory, and a deterministic mock ASR mode for E2E tests. Docker deployment is implemented in a later phase.
 
 ## Local Development
 
@@ -28,6 +28,16 @@ npm run dev
 ```
 
 Open `http://127.0.0.1:5173`.
+
+For `polish` and `markdown` output modes, configure the LLM before starting the Go API:
+
+```powershell
+$env:VOXMEM_LLM_API_KEY = "your-llm-api-key"
+$env:VOXMEM_LLM_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+$env:VOXMEM_LLM_MODEL = "qwen-plus"
+```
+
+VoxMem does not silently fall back when LLM post-processing fails. Missing keys, timeout, or upstream errors are returned to the web app as visible errors. Use `raw` mode when you only want ASR output plus local replacement memory.
 
 The web app calls `http://127.0.0.1:8080/healthz` by default. To use a different API URL:
 
@@ -88,7 +98,15 @@ cd D:\VoxMem\web
 npm run dev -- --host 127.0.0.1 --port 5174
 ```
 
-Then open `http://127.0.0.1:5174/`. Realtime ASR results appear in the transcript panel, and final sentence text appears in the editable output area after stopping the recording.
+Then open `http://127.0.0.1:5174/`. Realtime ASR results appear in the transcript panel, and local-memory-enhanced input text appears in the editable input area after stopping the recording.
+
+The output modes are:
+
+- `raw`: apply local replacement memory and return the resulting text without calling the LLM.
+- `polish`: call the configured LLM for conservative cleanup and self-correction handling.
+- `markdown`: call the configured LLM and request Markdown body output.
+
+When you edit the input text, the web app waits briefly for the text to stabilize, then automatically sends it to the API for `raw`, `polish`, or `markdown` processing. If the edited input differs from the local-memory-enhanced ASR text, the API stores a correction record in SQLite and extracts a local `from_text -> to_text` replacement. Future ASR final text for the same browser `user_id` applies those replacements before any LLM call. Newly learned replacements appear in a dismissible memory dialog with an undo action, and the hotword memory panel shows recent replacements and allows deletion.
 
 ## Debug Logs and Audio Capture
 

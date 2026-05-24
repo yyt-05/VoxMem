@@ -17,7 +17,7 @@ export default defineConfig({
   webServer: [
     {
       command:
-        'powershell -NoProfile -Command "$env:VOXMEM_SERVER_ADDR=\':18080\'; $env:VOXMEM_ASR_MODE=\'mock\'; $env:VOXMEM_ALLOWED_ORIGINS=\'http://127.0.0.1:5175\'; $env:VOXMEM_AUDIO_DEBUG_ENABLED=\'true\'; $env:VOXMEM_AUDIO_DEBUG_DIR=\'..\\tmp\\e2e-audio-debug\'; Set-Location ..\\server; go run .\\cmd\\server"',
+        'powershell -NoProfile -Command "$env:VOXMEM_SERVER_ADDR=\':18080\'; $env:VOXMEM_ASR_MODE=\'mock\'; $env:VOXMEM_ALLOWED_ORIGINS=\'http://127.0.0.1:5175\'; $env:VOXMEM_AUDIO_DEBUG_ENABLED=\'true\'; $env:VOXMEM_AUDIO_DEBUG_DIR=\'..\\tmp\\e2e-audio-debug\'; $env:VOXMEM_DB_PATH=\'..\\tmp\\e2e-voxmem.db\'; Set-Location ..\\server; go run .\\cmd\\server"',
       url: 'http://127.0.0.1:18080/healthz',
       reuseExistingServer: false,
       timeout: 30_000,

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -18,6 +19,8 @@ import (
 	"github.com/yyt-05/VoxMem/server/internal/asr"
 	"github.com/yyt-05/VoxMem/server/internal/audiodebug"
 	"github.com/yyt-05/VoxMem/server/internal/localenv"
+	"github.com/yyt-05/VoxMem/server/internal/memory"
+	"github.com/yyt-05/VoxMem/server/internal/textproc"
 )
 
 const serviceName = "voxmem-api"
@@ -35,6 +38,11 @@ type config struct {
 	asrSampleRate  int
 	audioDebug     bool
 	audioDebugDir  string
+	dbPath         string
+	llmAPIKey      string
+	llmBaseURL     string
+	llmModel       string
+	llmTimeout     time.Duration
 }
 
 type healthResponse struct {
@@ -51,10 +59,20 @@ func main() {
 
 	cfg := loadConfig()
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	store, err := memory.Open(cfg.dbPath)
+	if err != nil {
+		logger.Error("open memory store failed", "error", err, "db_path", cfg.dbPath)
+		os.Exit(1)
+	}
+	defer store.Close()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", healthzHandler(cfg))
-	mux.HandleFunc("GET /ws/asr", asrWebSocketHandler(cfg, logger))
+	mux.HandleFunc("GET /ws/asr", asrWebSocketHandler(cfg, logger, store))
+	mux.HandleFunc("POST /api/input/commit", inputCommitHandler(cfg, store, logger))
+	mux.HandleFunc("POST /api/correction", correctionHandler(store, logger))
+	mux.HandleFunc("GET /api/hotwords", hotwordsHandler(store, logger))
+	mux.HandleFunc("DELETE /api/hotwords/{id}", deleteHotwordHandler(store, logger))
 
 	server := &http.Server{
 		Addr:              cfg.addr,
@@ -120,6 +138,11 @@ func loadConfig() config {
 		asrSampleRate:  getenvInt("VOXMEM_ASR_SAMPLE_RATE", asr.DefaultSampleRate),
 		audioDebug:     getenvBool("VOXMEM_AUDIO_DEBUG_ENABLED", false),
 		audioDebugDir:  getenv("VOXMEM_AUDIO_DEBUG_DIR", filepath.Join("..", "tmp", "audio-debug")),
+		dbPath:         getenv("VOXMEM_DB_PATH", filepath.Join("..", "data", "voxmem.db")),
+		llmAPIKey:      strings.TrimSpace(os.Getenv("VOXMEM_LLM_API_KEY")),
+		llmBaseURL:     strings.TrimSpace(os.Getenv("VOXMEM_LLM_BASE_URL")),
+		llmModel:       strings.TrimSpace(os.Getenv("VOXMEM_LLM_MODEL")),
+		llmTimeout:     time.Duration(getenvInt("VOXMEM_LLM_TIMEOUT_SECONDS", 8)) * time.Second,
 	}
 }
 
@@ -135,14 +158,21 @@ func healthzHandler(cfg config) http.HandlerFunc {
 }
 
 type clientEvent struct {
-	Type    string `json:"type"`
-	TaskID  string `json:"task_id,omitempty"`
-	Text    string `json:"text,omitempty"`
-	Final   bool   `json:"final,omitempty"`
-	Message string `json:"message,omitempty"`
+	Type         string           `json:"type"`
+	TaskID       string           `json:"task_id,omitempty"`
+	Text         string           `json:"text,omitempty"`
+	Final        bool             `json:"final,omitempty"`
+	Message      string           `json:"message,omitempty"`
+	Mode         textproc.Mode    `json:"mode,omitempty"`
+	Status       string           `json:"status,omitempty"`
+	Source       string           `json:"source,omitempty"`
+	LatencyMS    int64            `json:"latency_ms,omitempty"`
+	OriginalText string           `json:"original_text,omitempty"`
+	EnhancedText string           `json:"enhanced_text,omitempty"`
+	Mappings     []memory.Mapping `json:"mappings,omitempty"`
 }
 
-func asrWebSocketHandler(cfg config, logger *slog.Logger) http.HandlerFunc {
+func asrWebSocketHandler(cfg config, logger *slog.Logger, store *memory.Store) http.HandlerFunc {
 	upgrader := websocket.Upgrader{
 		ReadBufferSize:  8192,
 		WriteBufferSize: 8192,
@@ -154,8 +184,23 @@ func asrWebSocketHandler(cfg config, logger *slog.Logger) http.HandlerFunc {
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
+		userID := strings.TrimSpace(r.URL.Query().Get("user_id"))
+		if userID == "" {
+			http.Error(w, "user_id is required", http.StatusBadRequest)
+			return
+		}
+		mode, err := textproc.ParseMode(r.URL.Query().Get("mode"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := store.EnsureUser(r.Context(), userID); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
 		if cfg.asrMode == "mock" {
-			handleMockASR(upgrader, cfg, logger, w, r)
+			handleMockASR(upgrader, cfg, logger, store, userID, mode, w, r)
 			return
 		}
 
@@ -203,10 +248,10 @@ func asrWebSocketHandler(cfg config, logger *slog.Logger) http.HandlerFunc {
 		}
 
 		sessionStartedAt := time.Now()
-		logger.Info("asr session ready", "task_id", started.TaskID, "mode", cfg.asrMode, "format", cfg.asrFormat, "sample_rate", cfg.asrSampleRate, "audio_debug", cfg.audioDebug)
+		logger.Info("asr session ready", "task_id", started.TaskID, "user_id", userID, "mode", cfg.asrMode, "output_mode", mode, "format", cfg.asrFormat, "sample_rate", cfg.asrSampleRate, "audio_debug", cfg.audioDebug)
 
 		writeDone := make(chan struct{})
-		go forwardASREvents(ctx, logger, stream, clientConn, writeDone)
+		go forwardASREvents(ctx, cfg, logger, store, userID, mode, stream, clientConn, writeDone)
 
 		audioFrames := 0
 		audioBytes := 0
@@ -260,7 +305,7 @@ func asrWebSocketHandler(cfg config, logger *slog.Logger) http.HandlerFunc {
 	}
 }
 
-func handleMockASR(upgrader websocket.Upgrader, cfg config, logger *slog.Logger, w http.ResponseWriter, r *http.Request) {
+func handleMockASR(upgrader websocket.Upgrader, cfg config, logger *slog.Logger, store *memory.Store, userID string, mode textproc.Mode, w http.ResponseWriter, r *http.Request) {
 	clientConn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		logger.Warn("upgrade mock websocket failed", "error", err)
@@ -282,7 +327,7 @@ func handleMockASR(upgrader websocket.Upgrader, cfg config, logger *slog.Logger,
 	if debugRecorder != nil {
 		defer closeAudioDebugRecorder(debugRecorder, logger, taskID)
 	}
-	logger.Info("mock asr session ready", "task_id", taskID, "audio_debug", cfg.audioDebug)
+	logger.Info("mock asr session ready", "task_id", taskID, "user_id", userID, "output_mode", mode, "audio_debug", cfg.audioDebug)
 
 	audioFrames := 0
 	audioBytes := 0
@@ -323,7 +368,7 @@ func handleMockASR(upgrader websocket.Upgrader, cfg config, logger *slog.Logger,
 				_ = clientConn.WriteJSON(clientEvent{Type: "transcript", Text: strings.TrimSuffix(cfg.asrMockText, "."), Final: false})
 			}
 			_ = clientConn.WriteJSON(clientEvent{Type: "transcript", Text: cfg.asrMockText, Final: true})
-			_ = clientConn.WriteJSON(clientEvent{Type: "done", TaskID: taskID})
+			finalizeOutput(r.Context(), cfg, logger, store, userID, mode, taskID, cfg.asrMockText, clientConn)
 			return
 		}
 	}
@@ -350,9 +395,10 @@ func closeAudioDebugRecorder(recorder *audiodebug.Recorder, logger *slog.Logger,
 	logger.Info("audio debug recording saved", "task_id", taskID, "pcm_path", pcmPath, "wav_path", wavPath, "audio_bytes", bytes)
 }
 
-func forwardASREvents(ctx context.Context, logger *slog.Logger, stream *asr.Stream, clientConn *websocket.Conn, done chan<- struct{}) {
+func forwardASREvents(ctx context.Context, cfg config, logger *slog.Logger, store *memory.Store, userID string, mode textproc.Mode, stream *asr.Stream, clientConn *websocket.Conn, done chan<- struct{}) {
 	defer close(done)
 
+	finalSegments := []string{}
 	for {
 		select {
 		case <-ctx.Done():
@@ -370,16 +416,224 @@ func forwardASREvents(ctx context.Context, logger *slog.Logger, stream *asr.Stre
 			logger.Info("asr event received", "task_id", stream.TaskID(), "event", event.Header.Event, "raw_len", len(event.Raw), "raw_preview", truncateLogValue(event.Raw, 500))
 			if text, final := asr.ExtractSentence(event); text != "" {
 				logger.Info("forward asr transcript", "task_id", stream.TaskID(), "final", final, "text_len", len(text))
+				if final {
+					finalSegments = append(finalSegments, text)
+				}
 				if err := clientConn.WriteJSON(clientEvent{Type: "transcript", Text: text, Final: final}); err != nil {
 					logger.Warn("forward transcript failed", "error", err)
 					return
 				}
 			}
 			if event.Header.Event == "task-finished" {
-				_ = clientConn.WriteJSON(clientEvent{Type: "done", TaskID: stream.TaskID()})
+				finalizeOutput(ctx, cfg, logger, store, userID, mode, stream.TaskID(), strings.Join(finalSegments, ""), clientConn)
 				return
 			}
 		}
+	}
+}
+
+func finalizeOutput(ctx context.Context, cfg config, logger *slog.Logger, store *memory.Store, userID string, mode textproc.Mode, taskID string, originalText string, clientConn *websocket.Conn) {
+	originalText = strings.TrimSpace(originalText)
+	if originalText == "" {
+		_ = clientConn.WriteJSON(clientEvent{Type: "done", TaskID: taskID})
+		return
+	}
+
+	enhancedText, hits, err := store.ApplyMappings(ctx, userID, originalText)
+	if err != nil {
+		_ = clientConn.WriteJSON(clientEvent{Type: "error", TaskID: taskID, Message: err.Error(), OriginalText: originalText, Mode: mode})
+		logger.Warn("apply local mappings failed", "task_id", taskID, "user_id", userID, "error", err)
+		return
+	}
+
+	if err := clientConn.WriteJSON(clientEvent{
+		Type:         "input_ready",
+		TaskID:       taskID,
+		Text:         enhancedText,
+		Final:        true,
+		Mode:         mode,
+		Status:       "ready",
+		Source:       "local",
+		OriginalText: originalText,
+		EnhancedText: enhancedText,
+		Mappings:     hits,
+	}); err != nil {
+		logger.Warn("forward input text failed", "task_id", taskID, "error", err)
+		return
+	}
+	_ = clientConn.WriteJSON(clientEvent{Type: "done", TaskID: taskID})
+}
+
+type inputCommitRequest struct {
+	UserID       string        `json:"user_id"`
+	SessionID    string        `json:"session_id"`
+	Mode         textproc.Mode `json:"mode"`
+	OriginalText string        `json:"original_text"`
+	EnhancedText string        `json:"enhanced_text"`
+	FinalText    string        `json:"final_text"`
+	RequestID    string        `json:"request_id,omitempty"`
+}
+
+type inputCommitResponse struct {
+	Status    string           `json:"status"`
+	Text      string           `json:"text"`
+	Mode      textproc.Mode    `json:"mode"`
+	Source    string           `json:"source"`
+	LatencyMS int64            `json:"latency_ms"`
+	Mappings  []memory.Mapping `json:"mappings"`
+}
+
+func inputCommitHandler(cfg config, store *memory.Store, logger *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var request inputCommitRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			logger.Warn("decode input commit body failed", "error", err)
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+
+		userID := strings.TrimSpace(request.UserID)
+		if userID == "" {
+			writeError(w, http.StatusBadRequest, errors.New("user_id is required"))
+			return
+		}
+
+		mode, err := textproc.ParseMode(string(request.Mode))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+
+		finalText := strings.TrimSpace(request.FinalText)
+		if finalText == "" {
+			writeError(w, http.StatusBadRequest, errors.New("final_text is required"))
+			return
+		}
+
+		originalText := strings.TrimSpace(request.OriginalText)
+		enhancedText := strings.TrimSpace(request.EnhancedText)
+		baselineText := enhancedText
+		if baselineText == "" {
+			baselineText = originalText
+		}
+
+		mappings := []memory.Mapping{}
+		if baselineText != "" && finalText != baselineText {
+			mappings, err = store.SaveCorrection(r.Context(), memory.Correction{
+				UserID:        userID,
+				SessionID:     request.SessionID,
+				OriginalText:  originalText,
+				EnhancedText:  enhancedText,
+				CorrectedText: finalText,
+			})
+			if err != nil {
+				logger.Warn("save input correction failed", "user_id", userID, "request_id", request.RequestID, "error", err)
+				writeError(w, http.StatusBadRequest, err)
+				return
+			}
+		} else if err := store.EnsureUser(r.Context(), userID); err != nil {
+			logger.Warn("ensure input user failed", "user_id", userID, "error", err)
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+
+		result, err := textproc.Process(r.Context(), textproc.Config{
+			APIKey:  cfg.llmAPIKey,
+			BaseURL: cfg.llmBaseURL,
+			Model:   cfg.llmModel,
+			Timeout: cfg.llmTimeout,
+		}, mode, finalText)
+		if err != nil {
+			logger.Warn("input text processing failed", "user_id", userID, "mode", mode, "request_id", request.RequestID, "error", err)
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, inputCommitResponse{
+			Status:    result.Status,
+			Text:      result.Text,
+			Mode:      result.Mode,
+			Source:    result.Source,
+			LatencyMS: result.LatencyMS,
+			Mappings:  mappings,
+		})
+	}
+}
+
+type correctionRequest struct {
+	UserID        string `json:"user_id"`
+	SessionID     string `json:"session_id"`
+	OriginalText  string `json:"original_text"`
+	EnhancedText  string `json:"enhanced_text"`
+	CorrectedText string `json:"corrected_text"`
+}
+
+type correctionResponse struct {
+	Status   string           `json:"status"`
+	Mappings []memory.Mapping `json:"mappings"`
+}
+
+func correctionHandler(store *memory.Store, logger *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var request correctionRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+
+		mappings, err := store.SaveCorrection(r.Context(), memory.Correction{
+			UserID:        request.UserID,
+			SessionID:     request.SessionID,
+			OriginalText:  request.OriginalText,
+			EnhancedText:  request.EnhancedText,
+			CorrectedText: request.CorrectedText,
+		})
+		if err != nil {
+			logger.Warn("save correction failed", "user_id", request.UserID, "error", err)
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, correctionResponse{Status: "ok", Mappings: mappings})
+	}
+}
+
+func hotwordsHandler(store *memory.Store, logger *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		userID := strings.TrimSpace(r.URL.Query().Get("user_id"))
+		mappings, err := store.ListMappings(r.Context(), userID)
+		if err != nil {
+			logger.Warn("list hotwords failed", "user_id", userID, "error", err)
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]any{
+			"mappings": mappings,
+		})
+	}
+}
+
+func deleteHotwordHandler(store *memory.Store, logger *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		userID := strings.TrimSpace(r.URL.Query().Get("user_id"))
+		id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+
+		if err := store.DeleteMapping(r.Context(), userID, id); err != nil {
+			logger.Warn("delete hotword failed", "user_id", userID, "id", id, "error", err)
+			if errors.Is(err, sql.ErrNoRows) {
+				writeError(w, http.StatusNotFound, err)
+				return
+			}
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	}
 }
 
@@ -423,6 +677,16 @@ func writeJSON(w http.ResponseWriter, statusCode int, payload any) {
 	if err := json.NewEncoder(w).Encode(payload); err != nil {
 		slog.Error("failed to write json response", "error", err)
 	}
+}
+
+func writeError(w http.ResponseWriter, statusCode int, err error) {
+	message := "unknown error"
+	if err != nil {
+		message = err.Error()
+	}
+	writeJSON(w, statusCode, map[string]string{
+		"error": message,
+	})
 }
 
 func getenv(key string, fallback string) string {
