@@ -97,6 +97,13 @@ func (s *Store) migrate(ctx context.Context) error {
 			updated_at TEXT NOT NULL,
 			UNIQUE(user_id, from_text, to_text)
 		)`,
+		`CREATE TABLE IF NOT EXISTS user_preferences (
+			user_id TEXT NOT NULL,
+			key TEXT NOT NULL,
+			value TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY(user_id, key)
+		)`,
 	}
 
 	for _, statement := range statements {
@@ -316,10 +323,98 @@ func (s *Store) DeleteMapping(ctx context.Context, userID string, id int64) erro
 	return nil
 }
 
+func (s *Store) SavePreference(ctx context.Context, userID string, key string, value string) error {
+	userID = strings.TrimSpace(userID)
+	key = strings.TrimSpace(key)
+	value = strings.TrimSpace(value)
+	if userID == "" || key == "" || value == "" {
+		return nil
+	}
+	if err := s.EnsureUser(ctx, userID); err != nil {
+		return err
+	}
+
+	now := timestamp()
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO user_preferences (user_id, key, value, updated_at)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+	`, userID, key, value, now)
+	if err != nil {
+		return fmt.Errorf("save preference: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) SaveFormatPreferences(ctx context.Context, userID string, llmOutput string, userFinal string) error {
+	for _, pref := range DetectPreferences(llmOutput, userFinal) {
+		if err := s.SavePreference(ctx, userID, pref.Key, pref.Value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) ListPreferences(ctx context.Context, userID string) ([]Preference, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return nil, nil
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT user_id, key, value
+		FROM user_preferences
+		WHERE user_id = ?
+		ORDER BY key
+	`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("list preferences: %w", err)
+	}
+	defer rows.Close()
+
+	var prefs []Preference
+	for rows.Next() {
+		var pref Preference
+		if err := rows.Scan(&pref.UserID, &pref.Key, &pref.Value); err != nil {
+			return nil, fmt.Errorf("scan preference: %w", err)
+		}
+		prefs = append(prefs, pref)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate preferences: %w", err)
+	}
+	return prefs, nil
+}
+
+func (s *Store) DeletePreference(ctx context.Context, userID string, key string) error {
+	userID = strings.TrimSpace(userID)
+	key = strings.TrimSpace(key)
+	if userID == "" || key == "" {
+		return nil
+	}
+
+	result, err := s.db.ExecContext(ctx, `DELETE FROM user_preferences WHERE user_id = ? AND key = ?`, userID, key)
+	if err != nil {
+		return fmt.Errorf("delete preference: %w", err)
+	}
+	deleted, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("read deleted preference count: %w", err)
+	}
+	if deleted == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
 func ExtractMappings(original string, corrected string) []Mapping {
 	original = strings.TrimSpace(original)
 	corrected = strings.TrimSpace(corrected)
 	if original == "" || corrected == "" || original == corrected {
+		return nil
+	}
+
+	if changeRatioTooHigh(original, corrected) {
 		return nil
 	}
 
@@ -409,6 +504,95 @@ func validMapping(from string, to string) bool {
 	}
 	if onlyPunctuationOrSpace(from) || onlyPunctuationOrSpace(to) {
 		return false
+	}
+	if !isEntityLike(from) || !isEntityLike(to) {
+		return false
+	}
+	return true
+}
+
+func changeRatioTooHigh(original string, corrected string) bool {
+	origRunes := []rune(original)
+	corrRunes := []rune(corrected)
+	maxLen := len(origRunes)
+	if len(corrRunes) > maxLen {
+		maxLen = len(corrRunes)
+	}
+	if maxLen == 0 {
+		return true
+	}
+	dist := levenshteinDistance(origRunes, corrRunes)
+	return float64(dist)/float64(maxLen) > 0.5
+}
+
+func levenshteinDistance(a, b []rune) int {
+	if len(a) == 0 {
+		return len(b)
+	}
+	if len(b) == 0 {
+		return len(a)
+	}
+
+	prev := make([]int, len(b)+1)
+	curr := make([]int, len(b)+1)
+	for j := 0; j <= len(b); j++ {
+		prev[j] = j
+	}
+
+	for i := 1; i <= len(a); i++ {
+		curr[0] = i
+		for j := 1; j <= len(b); j++ {
+			cost := 1
+			if a[i-1] == b[j-1] {
+				cost = 0
+			}
+			curr[j] = minInt(prev[j]+1, minInt(curr[j-1]+1, prev[j-1]+cost))
+		}
+		prev, curr = curr, prev
+	}
+	return prev[len(b)]
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+var functionWordRunes = map[rune]bool{
+	'的': true, '了': true, '是': true, '不': true,
+	'在': true, '和': true, '与': true, '或': true,
+	'也': true, '都': true, '就': true, '才': true,
+	'把': true, '被': true, '从': true, '对': true,
+	'向': true, '到': true, '给': true, '为': true,
+	'以': true, '用': true, '比': true, '让': true,
+	'吗': true, '呢': true, '吧': true, '啊': true,
+	'哦': true, '嗯': true, '呀': true, '很': true,
+	'太': true, '只': true, '个': true, '些': true,
+	'这': true, '那': true, '还': true, '又': true,
+	'再': true, '会': true, '要': true, '能': true,
+	'可': true, '且': true, '而': true, '但': true,
+	'因': true, '所': true, '如': true, '若': true,
+	'虽': true, '去': true, '来': true, '做': true,
+	'搞': true, '弄': true, '有': true, '说': true,
+	'想': true, '看': true, '叫': true, '没': true,
+	'过': true, '着': true, '得': true, '将': true,
+	'已': true, '之': true, '刚': true, '正': true,
+}
+
+func isEntityLike(s string) bool {
+	runes := []rune(s)
+	if len(runes) < 2 || len(runes) > 8 {
+		return false
+	}
+	for _, r := range runes {
+		if !unicode.Is(unicode.Han, r) {
+			return false
+		}
+		if functionWordRunes[r] {
+			return false
+		}
 	}
 	return true
 }

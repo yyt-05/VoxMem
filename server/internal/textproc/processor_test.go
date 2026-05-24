@@ -9,14 +9,14 @@ import (
 )
 
 func TestProcessRequiresLLMConfigForPolish(t *testing.T) {
-	_, err := Process(context.Background(), Config{}, ModePolish, "今天是星期一，不对今天是星期二")
+	_, err := Process(context.Background(), Config{}, ModePolish, "今天是星期一，不对今天是星期二", "")
 	if err == nil {
 		t.Fatal("expected missing LLM config error")
 	}
 }
 
 func TestProcessRawModeSkipsLLM(t *testing.T) {
-	result, err := Process(context.Background(), Config{}, ModeRaw, "今天是星期一，不对今天是星期二")
+	result, err := Process(context.Background(), Config{}, ModeRaw, "今天是星期一，不对今天是星期二", "")
 	if err != nil {
 		t.Fatalf("raw mode returned error: %v", err)
 	}
@@ -63,7 +63,7 @@ func TestProcessUsesOpenAICompatibleChatCompletion(t *testing.T) {
 		APIKey:  "test-key",
 		BaseURL: server.URL,
 		Model:   "test-model",
-	}, ModePolish, "今天是星期一，不对今天是星期二")
+	}, ModePolish, "今天是星期一，不对今天是星期二", "")
 	if err != nil {
 		t.Fatalf("process with llm: %v", err)
 	}

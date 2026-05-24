@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -15,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/aliyun/aliyun-oss-go-sdk/oss"
 	"github.com/gorilla/websocket"
 	"github.com/yyt-05/VoxMem/server/internal/asr"
 	"github.com/yyt-05/VoxMem/server/internal/audiodebug"
@@ -26,23 +30,27 @@ import (
 const serviceName = "voxmem-api"
 
 type config struct {
-	addr           string
-	allowedOrigins map[string]struct{}
-	env            string
-	asrMode        string
-	asrMockText    string
-	asrAPIKey      string
-	asrEndpoint    string
-	asrModel       string
-	asrFormat      string
-	asrSampleRate  int
-	audioDebug     bool
-	audioDebugDir  string
-	dbPath         string
-	llmAPIKey      string
-	llmBaseURL     string
-	llmModel       string
-	llmTimeout     time.Duration
+	addr               string
+	allowedOrigins     map[string]struct{}
+	env                string
+	asrMode            string
+	asrMockText        string
+	asrAPIKey          string
+	asrEndpoint        string
+	asrModel           string
+	asrFormat          string
+	asrSampleRate      int
+	audioDebug         bool
+	audioDebugDir      string
+	dbPath             string
+	llmAPIKey          string
+	llmBaseURL         string
+	llmModel           string
+	llmTimeout         time.Duration
+	ossEndpoint        string
+	ossAccessKeyID     string
+	ossAccessKeySecret string
+	ossBucket          string
 }
 
 type healthResponse struct {
@@ -73,6 +81,9 @@ func main() {
 	mux.HandleFunc("POST /api/correction", correctionHandler(store, logger))
 	mux.HandleFunc("GET /api/hotwords", hotwordsHandler(store, logger))
 	mux.HandleFunc("DELETE /api/hotwords/{id}", deleteHotwordHandler(store, logger))
+	mux.HandleFunc("GET /api/preferences", preferencesHandler(store, logger))
+	mux.HandleFunc("DELETE /api/preferences/{key}", deletePreferenceHandler(store, logger))
+	mux.HandleFunc("POST /api/transcribe/file", fileTranscribeHandler(cfg, logger))
 
 	server := &http.Server{
 		Addr:              cfg.addr,
@@ -126,23 +137,27 @@ func loadConfig() config {
 	}
 
 	return config{
-		addr:           addr,
-		allowedOrigins: allowedOrigins,
-		env:            env,
-		asrMode:        getenv("VOXMEM_ASR_MODE", "aliyun"),
-		asrMockText:    getenv("VOXMEM_ASR_MOCK_TEXT", "mock final text"),
-		asrAPIKey:      strings.TrimSpace(os.Getenv("DASHSCOPE_API_KEY")),
-		asrEndpoint:    getenv("VOXMEM_ASR_ENDPOINT", asr.DefaultEndpoint),
-		asrModel:       getenv("VOXMEM_ASR_MODEL", asr.DefaultModel),
-		asrFormat:      getenv("VOXMEM_ASR_FORMAT", asr.DefaultFormat),
-		asrSampleRate:  getenvInt("VOXMEM_ASR_SAMPLE_RATE", asr.DefaultSampleRate),
-		audioDebug:     getenvBool("VOXMEM_AUDIO_DEBUG_ENABLED", false),
-		audioDebugDir:  getenv("VOXMEM_AUDIO_DEBUG_DIR", filepath.Join("..", "tmp", "audio-debug")),
-		dbPath:         getenv("VOXMEM_DB_PATH", filepath.Join("..", "data", "voxmem.db")),
-		llmAPIKey:      strings.TrimSpace(os.Getenv("VOXMEM_LLM_API_KEY")),
-		llmBaseURL:     strings.TrimSpace(os.Getenv("VOXMEM_LLM_BASE_URL")),
-		llmModel:       strings.TrimSpace(os.Getenv("VOXMEM_LLM_MODEL")),
-		llmTimeout:     time.Duration(getenvInt("VOXMEM_LLM_TIMEOUT_SECONDS", 8)) * time.Second,
+		addr:               addr,
+		allowedOrigins:     allowedOrigins,
+		env:                env,
+		asrMode:            getenv("VOXMEM_ASR_MODE", "aliyun"),
+		asrMockText:        getenv("VOXMEM_ASR_MOCK_TEXT", "mock final text"),
+		asrAPIKey:          strings.TrimSpace(os.Getenv("DASHSCOPE_API_KEY")),
+		asrEndpoint:        getenv("VOXMEM_ASR_ENDPOINT", asr.DefaultEndpoint),
+		asrModel:           getenv("VOXMEM_ASR_MODEL", asr.DefaultModel),
+		asrFormat:          getenv("VOXMEM_ASR_FORMAT", asr.DefaultFormat),
+		asrSampleRate:      getenvInt("VOXMEM_ASR_SAMPLE_RATE", asr.DefaultSampleRate),
+		audioDebug:         getenvBool("VOXMEM_AUDIO_DEBUG_ENABLED", false),
+		audioDebugDir:      getenv("VOXMEM_AUDIO_DEBUG_DIR", filepath.Join("..", "tmp", "audio-debug")),
+		dbPath:             getenv("VOXMEM_DB_PATH", filepath.Join("..", "data", "voxmem.db")),
+		llmAPIKey:          strings.TrimSpace(os.Getenv("VOXMEM_LLM_API_KEY")),
+		llmBaseURL:         strings.TrimSpace(os.Getenv("VOXMEM_LLM_BASE_URL")),
+		llmModel:           strings.TrimSpace(os.Getenv("VOXMEM_LLM_MODEL")),
+		llmTimeout:         time.Duration(getenvInt("VOXMEM_LLM_TIMEOUT_SECONDS", 8)) * time.Second,
+		ossEndpoint:        getenv("VOXMEM_OSS_ENDPOINT", "oss-cn-hangzhou.aliyuncs.com"),
+		ossAccessKeyID:     strings.TrimSpace(os.Getenv("VOXMEM_OSS_ACCESS_KEY_ID")),
+		ossAccessKeySecret: strings.TrimSpace(os.Getenv("VOXMEM_OSS_ACCESS_KEY_SECRET")),
+		ossBucket:          strings.TrimSpace(os.Getenv("VOXMEM_OSS_BUCKET")),
 	}
 }
 
@@ -170,6 +185,7 @@ type clientEvent struct {
 	OriginalText string           `json:"original_text,omitempty"`
 	EnhancedText string           `json:"enhanced_text,omitempty"`
 	Mappings     []memory.Mapping `json:"mappings,omitempty"`
+	SpeakerID    string           `json:"speaker_id,omitempty"`
 }
 
 func asrWebSocketHandler(cfg config, logger *slog.Logger, store *memory.Store) http.HandlerFunc {
@@ -414,12 +430,12 @@ func forwardASREvents(ctx context.Context, cfg config, logger *slog.Logger, stor
 			}
 
 			logger.Info("asr event received", "task_id", stream.TaskID(), "event", event.Header.Event, "raw_len", len(event.Raw), "raw_preview", truncateLogValue(event.Raw, 500))
-			if text, final := asr.ExtractSentence(event); text != "" {
-				logger.Info("forward asr transcript", "task_id", stream.TaskID(), "final", final, "text_len", len(text))
+			if text, final, speakerID := asr.ExtractSentence(event); text != "" {
+				logger.Info("forward asr transcript", "task_id", stream.TaskID(), "final", final, "speaker_id", speakerID, "text_len", len(text))
 				if final {
 					finalSegments = append(finalSegments, text)
 				}
-				if err := clientConn.WriteJSON(clientEvent{Type: "transcript", Text: text, Final: final}); err != nil {
+				if err := clientConn.WriteJSON(clientEvent{Type: "transcript", Text: text, Final: final, SpeakerID: speakerID}); err != nil {
 					logger.Warn("forward transcript failed", "error", err)
 					return
 				}
@@ -542,11 +558,17 @@ func inputCommitHandler(cfg config, store *memory.Store, logger *slog.Logger) ht
 			BaseURL: cfg.llmBaseURL,
 			Model:   cfg.llmModel,
 			Timeout: cfg.llmTimeout,
-		}, mode, finalText)
+		}, mode, finalText, getFormatHint(r.Context(), store, userID))
 		if err != nil {
 			logger.Warn("input text processing failed", "user_id", userID, "mode", mode, "request_id", request.RequestID, "error", err)
 			writeError(w, http.StatusBadRequest, err)
 			return
+		}
+
+		if result.Source == "llm" {
+			if err := store.SaveFormatPreferences(r.Context(), userID, result.Text, finalText); err != nil {
+				logger.Warn("save format preferences failed", "user_id", userID, "error", err)
+			}
 		}
 
 		writeJSON(w, http.StatusOK, inputCommitResponse{
@@ -637,6 +659,143 @@ func deleteHotwordHandler(store *memory.Store, logger *slog.Logger) http.Handler
 	}
 }
 
+func getFormatHint(ctx context.Context, store *memory.Store, userID string) string {
+	prefs, err := store.ListPreferences(ctx, userID)
+	if err != nil {
+		return ""
+	}
+	return memory.PreferencesToPrompt(prefs)
+}
+
+func preferencesHandler(store *memory.Store, logger *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		userID := strings.TrimSpace(r.URL.Query().Get("user_id"))
+		prefs, err := store.ListPreferences(r.Context(), userID)
+		if err != nil {
+			logger.Warn("list preferences failed", "user_id", userID, "error", err)
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"preferences": prefs,
+		})
+	}
+}
+
+func deletePreferenceHandler(store *memory.Store, logger *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		userID := strings.TrimSpace(r.URL.Query().Get("user_id"))
+		key := r.PathValue("key")
+		if err := store.DeletePreference(r.Context(), userID, key); err != nil {
+			logger.Warn("delete preference failed", "user_id", userID, "key", key, "error", err)
+			if errors.Is(err, sql.ErrNoRows) {
+				writeError(w, http.StatusNotFound, err)
+				return
+			}
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	}
+}
+
+type fileTranscribeRequest struct {
+	AudioData []byte
+}
+
+type fileTranscribeResponse struct {
+	Sentences    []asr.SentenceResult `json:"sentences"`
+	FullText     string               `json:"full_text"`
+	SpeakerCount int                  `json:"speaker_count"`
+}
+
+func fileTranscribeHandler(cfg config, logger *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if cfg.asrAPIKey == "" {
+			writeError(w, http.StatusServiceUnavailable, errors.New("DASHSCOPE_API_KEY is not configured"))
+			return
+		}
+
+		audioData, err := io.ReadAll(r.Body)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("read audio: %w", err))
+			return
+		}
+		logger.Info("file transcribe: received audio", "audio_bytes", len(audioData))
+		if len(audioData) == 0 {
+			writeError(w, http.StatusBadRequest, errors.New("empty audio data"))
+			return
+		}
+
+		publicURL, err := uploadToOSS(cfg, r.Context(), audioData)
+		if err != nil {
+			logger.Warn("file transcribe: upload failed", "error", err)
+			writeError(w, http.StatusInternalServerError, fmt.Errorf("upload audio: %w", err))
+			return
+		}
+
+		logger.Info("file transcribe: submitted to DashScope", "audio_bytes", len(audioData), "url", publicURL)
+		taskID, err := asr.SubmitFileTranscription(r.Context(), asr.FileTranscribeConfig{
+			APIKey:             cfg.asrAPIKey,
+			FileURL:            publicURL,
+			DiarizationEnabled: true,
+			SpeakerCount:       0,
+		})
+		if err != nil {
+			logger.Warn("file transcribe: submit failed", "error", err)
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+
+		result, err := asr.WaitForTranscription(r.Context(), cfg.asrAPIKey, taskID, 120*time.Second)
+		if err != nil {
+			logger.Warn("file transcribe: wait failed", "task_id", taskID, "error", err)
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+
+		logger.Info("file transcribe: completed", "task_id", taskID, "sentences", len(result.Sentences))
+		speakers := make(map[int]bool)
+		var fullTextParts []string
+		for _, s := range result.Sentences {
+			speakers[s.SpeakerID] = true
+			fullTextParts = append(fullTextParts, s.Text)
+		}
+
+		writeJSON(w, http.StatusOK, fileTranscribeResponse{
+			Sentences:    result.Sentences,
+			FullText:     strings.Join(fullTextParts, ""),
+			SpeakerCount: len(speakers),
+		})
+	}
+}
+
+func uploadToOSS(cfg config, ctx context.Context, data []byte) (string, error) {
+	client, err := oss.New(cfg.ossEndpoint, cfg.ossAccessKeyID, cfg.ossAccessKeySecret)
+	if err != nil {
+		return "", fmt.Errorf("create oss client: %w", err)
+	}
+	bucket, err := client.Bucket(cfg.ossBucket)
+	if err != nil {
+		return "", fmt.Errorf("get oss bucket: %w", err)
+	}
+	objectKey := "audio/" + time.Now().Format("20060102-150405") + "-" + randomHex(8) + ".wav"
+	if err := bucket.PutObject(objectKey, bytes.NewReader(data)); err != nil {
+		return "", fmt.Errorf("oss put object: %w", err)
+	}
+	url := "https://" + cfg.ossBucket + "." + cfg.ossEndpoint + "/" + objectKey
+	slog.Info("file transcribe: uploaded to OSS", "url", url, "bytes", len(data))
+	return url, nil
+}
+
+func randomHex(n int) string {
+	const hexChars = "0123456789abcdef"
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = hexChars[time.Now().UnixNano()%int64(len(hexChars))]
+	}
+	return string(b)
+}
 func truncateLogValue(value string, limit int) string {
 	if len(value) <= limit {
 		return value

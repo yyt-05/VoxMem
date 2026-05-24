@@ -165,3 +165,84 @@ func TestStoreSaveCorrectionReplacesConflictingMapping(t *testing.T) {
 		t.Fatalf("expected latest conflicting mapping to remain, got %+v", mappings)
 	}
 }
+
+func TestExtractMappingsSkipsHighChangeRatio(t *testing.T) {
+	mappings := ExtractMappings("今天要去找张三做对接", "今天确认一下方案")
+	if len(mappings) != 0 {
+		t.Fatalf("expected high change ratio to be skipped, got %+v", mappings)
+	}
+}
+
+func TestExtractMappingsSkipsFunctionWords(t *testing.T) {
+	mappings := ExtractMappings("今天要去找张力", "今天找张力")
+	if len(mappings) != 0 {
+		t.Fatalf("expected function-word change to be skipped, got %+v", mappings)
+	}
+}
+
+func TestExtractMappingsSkipsVerbRewrite(t *testing.T) {
+	mappings := ExtractMappings("今天找张三做对接", "今天找张三确认方案")
+	if len(mappings) != 0 {
+		t.Fatalf("expected verb rewrite to be skipped, got %+v", mappings)
+	}
+}
+
+func TestExtractMappingsKeepsNameCorrection(t *testing.T) {
+	mappings := ExtractMappings("今天找张立确认方案", "今天找张莉确认方案")
+	if len(mappings) != 1 {
+		t.Fatalf("expected one mapping, got %d", len(mappings))
+	}
+	if mappings[0].FromText != "张立" || mappings[0].ToText != "张莉" {
+		t.Fatalf("unexpected mapping: %+v", mappings[0])
+	}
+}
+
+func TestExtractMappingsKeepsTechnicalTermCorrection(t *testing.T) {
+	mappings := ExtractMappings("确认熔断基制已生效", "确认熔断机制已生效")
+	if len(mappings) != 1 {
+		t.Fatalf("expected one mapping, got %d", len(mappings))
+	}
+	if mappings[0].FromText != "断基" || mappings[0].ToText != "断机" {
+		t.Fatalf("unexpected mapping: %+v", mappings[0])
+	}
+}
+
+func TestIsEntityLikeRejectsFunctionWords(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected bool
+	}{
+		{"张力", true},
+		{"张三", true},
+		{"熔断机制", true},
+		{"要去找", false}, // 要/去 are function words
+		{"做对接", false}, // 做 is function word
+		{"的", false},   // too short + function word
+		{"这个", false},  // 这/个
+	}
+	for _, test := range tests {
+		got := isEntityLike(test.input)
+		if got != test.expected {
+			t.Errorf("isEntityLike(%q) = %v, expected %v", test.input, got, test.expected)
+		}
+	}
+}
+
+func TestChangeRatioTooHigh(t *testing.T) {
+	tests := []struct {
+		original  string
+		corrected string
+		expected  bool
+	}{
+		{"今天找张立确认方案", "今天找张莉确认方案", false}, // one char change
+		{"今天要去找张三做对接", "今天确认一下方案", true},  // major rewrite
+		{"张三", "确认一下方案", true},            // complete rewrite
+		{"张力", "张立", false},               // one char
+	}
+	for _, test := range tests {
+		got := changeRatioTooHigh(test.original, test.corrected)
+		if got != test.expected {
+			t.Errorf("changeRatioTooHigh(%q, %q) = %v, expected %v", test.original, test.corrected, got, test.expected)
+		}
+	}
+}

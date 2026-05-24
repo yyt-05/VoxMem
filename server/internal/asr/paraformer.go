@@ -70,8 +70,9 @@ type recognitionEvent struct {
 	Payload struct {
 		Output struct {
 			Sentence struct {
-				Text        string `json:"text"`
-				SentenceEnd bool   `json:"sentence_end"`
+				Text        string  `json:"text"`
+				SentenceEnd bool    `json:"sentence_end"`
+				SpeakerID   *string `json:"speaker_id"`
 			} `json:"sentence"`
 		} `json:"output"`
 	} `json:"payload"`
@@ -232,17 +233,21 @@ func (s *Stream) Close() {
 	s.closeFn()
 }
 
-func ExtractSentence(event ServerEvent) (text string, sentenceEnd bool) {
+func ExtractSentence(event ServerEvent) (text string, sentenceEnd bool, speakerID string) {
 	if event.Header.Event != "result-generated" {
-		return "", false
+		return "", false, ""
 	}
 
 	var recognition recognitionEvent
 	if err := json.Unmarshal([]byte(event.Raw), &recognition); err != nil {
-		return "", false
+		return "", false, ""
 	}
 
-	return strings.TrimSpace(recognition.Payload.Output.Sentence.Text), recognition.Payload.Output.Sentence.SentenceEnd
+	sid := ""
+	if recognition.Payload.Output.Sentence.SpeakerID != nil {
+		sid = *recognition.Payload.Output.Sentence.SpeakerID
+	}
+	return strings.TrimSpace(recognition.Payload.Output.Sentence.Text), recognition.Payload.Output.Sentence.SentenceEnd, sid
 }
 
 func connect(ctx context.Context, cfg Config) (*websocket.Conn, <-chan ServerEvent, <-chan error, func(), error) {
@@ -354,7 +359,7 @@ func appendEvent(result *ProbeResult, event ServerEvent) {
 		return
 	}
 
-	text, sentenceEnd := ExtractSentence(event)
+	text, sentenceEnd, _ := ExtractSentence(event)
 	if text != "" && sentenceEnd {
 		if result.FinalText != "" {
 			result.FinalText += "\n"

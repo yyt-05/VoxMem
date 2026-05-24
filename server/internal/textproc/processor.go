@@ -55,7 +55,7 @@ type chatResponse struct {
 	} `json:"error,omitempty"`
 }
 
-func Process(ctx context.Context, cfg Config, mode Mode, input string) (Result, error) {
+func Process(ctx context.Context, cfg Config, mode Mode, input string, formatHint string) (Result, error) {
 	startedAt := time.Now()
 	input = strings.TrimSpace(input)
 	if err := ValidateMode(mode); err != nil {
@@ -69,7 +69,7 @@ func Process(ctx context.Context, cfg Config, mode Mode, input string) (Result, 
 		return Result{Text: input, Mode: mode, Status: "skipped", Source: "local", LatencyMS: time.Since(startedAt).Milliseconds()}, nil
 	}
 
-	output, err := processWithLLM(ctx, cfg, mode, input)
+	output, err := processWithLLM(ctx, cfg, mode, input, formatHint)
 	if err != nil {
 		return Result{Mode: mode, Status: "failed", Source: "llm", LatencyMS: time.Since(startedAt).Milliseconds()}, err
 	}
@@ -103,7 +103,7 @@ func ValidateMode(mode Mode) error {
 	}
 }
 
-func processWithLLM(ctx context.Context, cfg Config, mode Mode, input string) (string, error) {
+func processWithLLM(ctx context.Context, cfg Config, mode Mode, input string, formatHint string) (string, error) {
 	apiKey := strings.TrimSpace(cfg.APIKey)
 	if apiKey == "" {
 		return "", errors.New("VOXMEM_LLM_API_KEY is not configured")
@@ -125,7 +125,7 @@ func processWithLLM(ctx context.Context, cfg Config, mode Mode, input string) (s
 		Model:       model,
 		Temperature: 0.1,
 		Messages: []chatMessage{
-			{Role: "system", Content: systemPrompt(mode)},
+			{Role: "system", Content: systemPrompt(mode, formatHint)},
 			{Role: "user", Content: input},
 		},
 	}
@@ -170,17 +170,15 @@ func processWithLLM(ctx context.Context, cfg Config, mode Mode, input string) (s
 	return output, nil
 }
 
-func systemPrompt(mode Mode) string {
+func systemPrompt(mode Mode, formatHint string) string {
+	base := ""
 	if mode == ModeMarkdown {
-		return strings.TrimSpace(`你是 VoxMem 的中文语音输入整理器。
-只输出 Markdown 正文，不要解释。
-保留用户原意，不添加原文没有的信息。
-识别“第一点、第二点、首先、然后、最后”等口头列表表达，整理为 Markdown 列表。
-遇到“不对、不是、应该是、改成”等明确自我纠正时，以纠正后的内容为准。`)
+		base = "你是 VoxMem 的中文语音输入整理器。\n只输出 Markdown 正文，不要解释。\n保留用户原意，不添加原文没有的信息。\n识别“第一点、第二点、首先、然后、最后”等口头列表表达，整理为 Markdown 列表。\n遇到“不对、不是、应该是、改成”等明确自我纠正时，以纠正后的内容为准。"
+	} else {
+		base = "你是 VoxMem 的中文语音输入整理器。\n只输出整理后的正文，不要解释。\n保留用户原意，不添加原文没有的信息。\n处理“不对、不是、应该是、改成”等明确自我纠正表达，以纠正后的内容为准。\n删除明显口头填充词和重复片段，让文本更清晰，但不要主观扩写。"
 	}
-	return strings.TrimSpace(`你是 VoxMem 的中文语音输入整理器。
-只输出整理后的正文，不要解释。
-保留用户原意，不添加原文没有的信息。
-处理“不对、不是、应该是、改成”等明确自我纠正表达，以纠正后的内容为准。
-删除明显口头填充词和重复片段，让文本更清晰，但不要主观扩写。`)
+	if formatHint != "" {
+		base += "\n\n" + formatHint
+	}
+	return strings.TrimSpace(base)
 }

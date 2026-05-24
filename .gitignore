@@ -27,6 +27,8 @@ web/vite.config.d.ts
 web/vite.config.js
 web/test-results/
 web/playwright-report/
+web/output/
+server/*.exe
 
 # Python
 __pycache__/
