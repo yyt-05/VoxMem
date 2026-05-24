@@ -875,15 +875,6 @@ function App() {
     }));
   }
 
-  function handleSurfaceModeChange(nextMode: SurfaceMode) {
-    const option = surfaceModes.find((item) => item.id === nextMode);
-    if (!option) {
-      return;
-    }
-    setSurfaceMode(nextMode);
-    setMode(option.outputMode);
-  }
-
   function clearSessionText() {
     setLiveText('');
     setInputText('');
@@ -939,20 +930,6 @@ function App() {
         </div>
       </header>
 
-      <nav className="mode-switch" aria-label={'\u8f93\u51fa\u6a21\u5f0f'}>
-        {surfaceModes.map((option) => (
-          <button
-            key={option.id}
-            className={surfaceMode === option.id ? 'active' : ''}
-            type="button"
-            disabled={isRecordingActive}
-            onClick={() => handleSurfaceModeChange(option.id)}
-          >
-            <span>{option.label}</span>
-          </button>
-        ))}
-      </nav>
-
       <section className="workspace" aria-label={text.workspaceTitle}>
         <div className="recorder-panel">
           <label className="mic-selector">
@@ -1006,7 +983,7 @@ function App() {
             </div>
 
             <div className="result-flow">
-              <section className="source-text transcript-card">
+              <section className="source-text transcript-card live-transcript-panel">
                 <div className="card-title">
                   <FileText size={18} aria-hidden="true" />
                   <h2>{'\u539f\u59cb\u8f6c\u5199'}</h2>
@@ -1015,8 +992,7 @@ function App() {
                   {liveText || '\u4eca\u5929\u662f\u661f\u671f\u4e00\uff0c\u4e0d\u5bf9\uff0c\u4eca\u5929\u662f\u661f\u671f\u4e8c\uff0c\n\u7136\u540e\u90a3\u4e2a\u5f20\u529b\u8981\u540c\u6b65\u7194\u65ad\u673a\u5236...'}
                 </p>
               </section>
-              <span className="flow-arrow" aria-hidden="true">{'\u2192'}</span>
-              <section className="source-text edited-card">
+              <section className="source-text edited-card polished-text-panel">
                 <div className="card-title">
                   <Sparkles size={18} aria-hidden="true" />
                   <h2>{'\u6574\u7406\u540e\u6587\u5b57'}</h2>
