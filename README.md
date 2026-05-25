@@ -4,6 +4,7 @@
 
 VoxMem 是一个面向高频中文语音输入场景的 Web 应用。它通过浏览器采集麦克风音频，由 Go 后端代理到阿里云 DashScope Paraformer 实时语音识别，再结合本地纠错记忆和 LLM 文本整理，把口语输入变成更可用的文本。
 
+
 核心演示点：
 
 - 实时语音识别：浏览器录音后实时显示识别文本。
@@ -97,7 +98,7 @@ npm run dev
 
 ## Mock 模式启动（无 API Key 兜底演示）
 
-评审现场如果没有可用的 DashScope API Key，可以使用 Mock ASR 模式演示页面、录音交互、文本编辑、本地记忆和指标流程。
+如果没有可用的 DashScope API Key，可以使用 Mock ASR 模式演示页面、录音交互、文本编辑、本地记忆和指标流程。
 
 PowerShell 窗口 1：
 
