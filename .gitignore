@@ -29,6 +29,7 @@ web/test-results/
 web/playwright-report/
 web/output/
 server/*.exe
+server/.gocache/
 
 # Python
 __pycache__/

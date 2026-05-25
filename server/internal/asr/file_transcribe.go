@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -53,6 +54,8 @@ type fileTranscribeResponse struct {
 		TaskID     string `json:"task_id"`
 	} `json:"output"`
 	RequestID string `json:"request_id"`
+	Code      string `json:"code,omitempty"`
+	Message   string `json:"message,omitempty"`
 }
 
 type taskQueryResponse struct {
@@ -61,11 +64,15 @@ type taskQueryResponse struct {
 		TaskID     string                `json:"task_id"`
 		Results    []taskQueryResultItem `json:"results"`
 	} `json:"output"`
+	Code    string `json:"code,omitempty"`
+	Message string `json:"message,omitempty"`
 }
 
 type taskQueryResultItem struct {
 	SubtaskStatus    string `json:"subtask_status"`
 	TranscriptionURL string `json:"transcription_url"`
+	Code             string `json:"code,omitempty"`
+	Message          string `json:"message,omitempty"`
 }
 
 type transcriptionFile struct {
@@ -127,15 +134,19 @@ func SubmitFileTranscription(ctx context.Context, cfg FileTranscribeConfig) (str
 	}
 	defer resp.Body.Close()
 
+	responseBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("read transcribe response: %w", err)
+	}
 	var result fileTranscribeResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.Unmarshal(responseBody, &result); err != nil {
 		return "", fmt.Errorf("decode transcribe response: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("transcribe submission failed with HTTP %d", resp.StatusCode)
+		return "", fmt.Errorf("transcribe submission failed with HTTP %d: code=%s message=%s body=%s", resp.StatusCode, result.Code, result.Message, truncateForError(responseBody, 800))
 	}
 	if result.Output.TaskID == "" {
-		return "", fmt.Errorf("no task_id in response")
+		return "", fmt.Errorf("no task_id in response: code=%s message=%s body=%s", result.Code, result.Message, truncateForError(responseBody, 800))
 	}
 	return result.Output.TaskID, nil
 }
@@ -170,24 +181,46 @@ func WaitForTranscription(ctx context.Context, apiKey string, taskID string, tim
 			return nil, fmt.Errorf("query task status: %w", err)
 		}
 
+		responseBody, readErr := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if readErr != nil {
+			return nil, fmt.Errorf("read query response: %w", readErr)
+		}
+
 		var result taskQueryResponse
-		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-			resp.Body.Close()
+		if err := json.Unmarshal(responseBody, &result); err != nil {
 			return nil, fmt.Errorf("decode query response: %w", err)
 		}
-		resp.Body.Close()
 
 		switch result.Output.TaskStatus {
 		case "SUCCEEDED":
 			return fetchTranscriptionResult(ctx, result.Output.Results)
 		case "FAILED", "ERROR":
-			return nil, fmt.Errorf("transcription task %s", result.Output.TaskStatus)
+			return nil, fmt.Errorf("transcription task %s: code=%s message=%s results=%s body=%s", result.Output.TaskStatus, result.Code, result.Message, summarizeTaskResults(result.Output.Results), truncateForError(responseBody, 1000))
 		case "PENDING", "RUNNING":
 			continue
 		default:
-			return nil, fmt.Errorf("unknown task status: %s", result.Output.TaskStatus)
+			return nil, fmt.Errorf("unknown task status: %s body=%s", result.Output.TaskStatus, truncateForError(responseBody, 1000))
 		}
 	}
+}
+
+func summarizeTaskResults(results []taskQueryResultItem) string {
+	if len(results) == 0 {
+		return "[]"
+	}
+	parts := make([]string, 0, len(results))
+	for _, result := range results {
+		parts = append(parts, fmt.Sprintf("{status=%s code=%s message=%s url=%t}", result.SubtaskStatus, result.Code, result.Message, result.TranscriptionURL != ""))
+	}
+	return strings.Join(parts, ",")
+}
+
+func truncateForError(body []byte, limit int) string {
+	if limit <= 0 || len(body) <= limit {
+		return string(body)
+	}
+	return string(body[:limit]) + "..."
 }
 
 func fetchTranscriptionResult(ctx context.Context, results []taskQueryResultItem) (*TranscriptionResult, error) {

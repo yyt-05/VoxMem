@@ -5,13 +5,20 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
-func TestProcessRequiresLLMConfigForPolish(t *testing.T) {
-	_, err := Process(context.Background(), Config{}, ModePolish, "今天是星期一，不对今天是星期二", "")
-	if err == nil {
-		t.Fatal("expected missing LLM config error")
+func TestProcessFallsBackToLocalPolishWithoutLLMConfig(t *testing.T) {
+	result, err := Process(context.Background(), Config{}, ModePolish, "嗯，那个那个那个叫张三的那个人，你去联系一下。", "")
+	if err != nil {
+		t.Fatalf("expected local polish fallback, got error: %v", err)
+	}
+	if result.Source != "local_fallback" || result.Status != "completed" {
+		t.Fatalf("unexpected fallback metadata: %+v", result)
+	}
+	if result.Text != "叫张三的那个人，你去联系一下。" {
+		t.Fatalf("unexpected local polish output: %q", result.Text)
 	}
 }
 
@@ -28,9 +35,41 @@ func TestProcessRawModeSkipsLLM(t *testing.T) {
 	}
 }
 
+func TestProcessMarkdownRequiresLLMConfig(t *testing.T) {
+	result, err := Process(context.Background(), Config{}, ModeMarkdown, "first point, second point", "")
+	if err == nil {
+		t.Fatal("expected markdown mode to require LLM configuration")
+	}
+	if !strings.Contains(err.Error(), "VOXMEM_LLM_API_KEY") {
+		t.Fatalf("unexpected markdown error: %v", err)
+	}
+	if result.Mode != ModeMarkdown || result.Status != "failed" || result.Source != "llm" {
+		t.Fatalf("unexpected markdown result metadata: %+v", result)
+	}
+}
+
 func TestParseModeRejectsUnsupportedMode(t *testing.T) {
 	if _, err := ParseMode("email"); err == nil {
 		t.Fatal("expected unsupported mode error")
+	}
+}
+
+func TestPolishPromptRequiresWrittenCleanup(t *testing.T) {
+	prompt := systemPrompt(ModePolish, "")
+	for _, want := range []string{"书面中文", "自我纠正", "口头填充", "不要主观扩写"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("expected polish prompt to contain %q, got %q", want, prompt)
+		}
+	}
+}
+
+func TestLocalPolishHandlesSimpleSelfCorrection(t *testing.T) {
+	result, err := Process(context.Background(), Config{}, ModePolish, "今天是星期一，不对今天是星期二", "")
+	if err != nil {
+		t.Fatalf("expected local polish fallback, got error: %v", err)
+	}
+	if result.Text != "今天是星期二" {
+		t.Fatalf("unexpected self-correction output: %q", result.Text)
 	}
 }
 
@@ -72,6 +111,43 @@ func TestProcessUsesOpenAICompatibleChatCompletion(t *testing.T) {
 	}
 	if result.Source != "llm" || result.Status != "completed" {
 		t.Fatalf("unexpected result metadata: %+v", result)
+	}
+}
+
+func TestProcessPreCleansPolishInputBeforeLLM(t *testing.T) {
+	var llmInput string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request chatRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if len(request.Messages) < 2 {
+			t.Fatalf("expected system and user messages, got %+v", request.Messages)
+		}
+		llmInput = request.Messages[1].Content
+		writeTestJSON(w, chatResponse{
+			Choices: []struct {
+				Message chatMessage `json:"message"`
+			}{
+				{Message: chatMessage{Role: "assistant", Content: "下周三之前王平要完成整理材料的工作。"}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	result, err := Process(context.Background(), Config{
+		APIKey:  "test-key",
+		BaseURL: server.URL,
+		Model:   "test-model",
+	}, ModePolish, "嗯嗯，就是下周一不对，下周三之前呃，王平你要去完成这个呃那个那个整理材料的这个工作。", "")
+	if err != nil {
+		t.Fatalf("process with llm: %v", err)
+	}
+	if strings.Contains(llmInput, "下周一不对") || strings.Contains(llmInput, "下周一不行") {
+		t.Fatalf("expected corrected llm input, got %q", llmInput)
+	}
+	if result.Text != "下周三之前王平要完成整理材料的工作。" {
+		t.Fatalf("unexpected processed text: %q", result.Text)
 	}
 }
 

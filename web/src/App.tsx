@@ -14,7 +14,7 @@
   Trash2,
   X,
 } from 'lucide-react';
-import { type CSSProperties, useEffect, useMemo, useRef, useState } from 'react';
+import { type CSSProperties, type WheelEvent, useEffect, useMemo, useRef, useState } from 'react';
 
 declare global {
   interface Window {
@@ -128,11 +128,50 @@ type MicDiagnostics = {
 type FileTranscribeSentence = {
   text: string;
   speaker_id: number;
+  begin_time?: number;
+  end_time?: number;
+};
+
+type FileTranscribeResponse = {
+  sentences?: FileTranscribeSentence[];
+  full_text?: string;
+  speaker_count?: number;
+  error?: string;
 };
 
 type IntroScene = 'polish' | 'memory' | 'voice';
 
 const introSceneOrder: IntroScene[] = ['polish', 'memory', 'voice'];
+
+const introFeatureCards: Array<{
+  key: IntroScene;
+  label: string;
+  title: string;
+  body: string;
+  metric: string;
+}> = [
+  {
+    key: 'polish',
+    label: '01 / 改口清理',
+    title: '先听懂你真正要保留的那句话',
+    body: '口述里的“不对、应该是、刚才说错了”会被识别成修正动作，重复和填充词自动退到背景里。',
+    metric: '把反复确认压缩成最终结论',
+  },
+  {
+    key: 'memory',
+    label: '02 / 本地记忆',
+    title: '你修正过一次的词，下次优先命中',
+    body: '同事名、客户名、项目代号会沉淀成本地替换规则，不需要每次重新纠正。',
+    metric: '编辑后进入个人热词规则',
+  },
+  {
+    key: 'voice',
+    label: '03 / 声纹过滤',
+    title: '多人声音里，只留下你的正文',
+    body: '会议室和开放办公区里，先切分说话人，再把旁人的插话折叠掉，减少混入正文。',
+    metric: '保留目标说话人的有效片段',
+  },
+];
 
 const introScenarios: Record<IntroScene, {
   eyebrow: string;
@@ -174,6 +213,7 @@ const realtimeProcessorBufferSize = 1024;
 const voiceFilterProcessorBufferSize = 4096;
 const realtimeUIUpdateEveryFrames = 4;
 const debugEnabled = import.meta.env.DEV;
+const voiceGuideStorageKey = 'voxmem.voice-filter-guide.dismissed';
 
 const text = {
   apiConnected: '\u0041\u0050\u0049 \u5df2\u8fde\u63a5',
@@ -238,6 +278,7 @@ const text = {
   audioContextUnsupported: '\u5f53\u524d\u6d4f\u89c8\u5668\u4e0d\u652f\u6301 AudioContext',
   sampleRateError: '\u76ee\u6807\u91c7\u6837\u7387\u4e0d\u80fd\u9ad8\u4e8e\u8f93\u5165\u91c7\u6837\u7387',
   startRecordingTitle: '\u5f00\u59cb\u5f55\u97f3',
+  stopRecordingTitle: '\u505c\u6b62\u5f55\u97f3',
 };
 
 function App() {
@@ -274,6 +315,13 @@ function App() {
   const [selectedSpeaker, setSelectedSpeaker] = useState('');
   const [hasMultipleSpeakers, setHasMultipleSpeakers] = useState(false);
   const [voiceFilterMode, setVoiceFilterMode] = useState(false);
+  const [voiceGuideDismissed, setVoiceGuideDismissed] = useState(() => {
+    try {
+      return localStorage.getItem(voiceGuideStorageKey) === 'true';
+    } catch {
+      return false;
+    }
+  });
   const [voiceFilterLoading, setVoiceFilterLoading] = useState(false);
   const [voiceFilterResult, setVoiceFilterResult] = useState<{
     sentences: FileTranscribeSentence[];
@@ -296,10 +344,13 @@ function App() {
   const lastCommittedKeyRef = useRef('');
   const inFlightCommitKeyRef = useRef<string | null>(null);
   const latestInputKeyRef = useRef('');
+  const manualEditBaseRef = useRef('');
+  const hasManualEditRef = useRef(false);
   const voiceBaselineRef = useRef(0);
   const voiceFrameCountRef = useRef(0);
   const voiceFilterSampleRateRef = useRef(targetSampleRate);
   const filteredFrameCountRef = useRef(0);
+  const voiceFilterAppliedTextRef = useRef('');
 
   const statusLabel = useMemo(() => {
     if (healthState === 'ok') return text.apiConnected;
@@ -349,20 +400,114 @@ function App() {
     });
   }, [rawFinalText, inputText, processedText, enhancedText, processingState]);
 
+  const introStoryRefs = useRef<Array<HTMLElement | null>>([]);
+  const introSectionRefs = useRef<Array<HTMLElement | null>>([]);
+  const introScrollLockRef = useRef<number | null>(null);
+
   useEffect(() => {
     if (!showIntro) {
       return undefined;
     }
 
-    const timer = window.setInterval(() => {
-      setIntroScene((current) => {
-        const currentIndex = introSceneOrder.indexOf(current);
-        return introSceneOrder[(currentIndex + 1) % introSceneOrder.length];
-      });
-    }, 5200);
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const visibleEntry = entries
+          .filter((entry) => entry.isIntersecting)
+          .sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0];
 
-    return () => window.clearInterval(timer);
+        const scene = visibleEntry?.target.getAttribute('data-scene') as IntroScene | null;
+        if (scene) {
+          setIntroScene(scene);
+        }
+      },
+      {
+        root: null,
+        rootMargin: '-28% 0px -46% 0px',
+        threshold: [0.24, 0.42, 0.64],
+      },
+    );
+
+    introStoryRefs.current.forEach((node) => {
+      if (node) {
+        observer.observe(node);
+      }
+    });
+
+    return () => observer.disconnect();
   }, [showIntro]);
+
+  function focusIntroScene(scene: IntroScene) {
+    setIntroScene(scene);
+    const index = introSceneOrder.indexOf(scene);
+    introStoryRefs.current[index]?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  function jumpIntroPage(direction: 1 | -1) {
+    const sections = introSectionRefs.current.filter(Boolean) as HTMLElement[];
+    const currentIndex = sections.reduce((closestIndex, section, index) => {
+      const currentDistance = Math.abs(section.getBoundingClientRect().top);
+      const closestDistance = Math.abs(sections[closestIndex].getBoundingClientRect().top);
+      return currentDistance < closestDistance ? index : closestIndex;
+    }, 0);
+    const nextIndex = Math.max(0, Math.min(sections.length - 1, currentIndex + direction));
+    sections[nextIndex]?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  function handleIntroWheel(event: WheelEvent<HTMLElement>) {
+    if (Math.abs(event.deltaY) < 18) {
+      return;
+    }
+
+    event.preventDefault();
+
+    if (introScrollLockRef.current) {
+      return;
+    }
+
+    jumpIntroPage(event.deltaY > 0 ? 1 : -1);
+    introScrollLockRef.current = window.setTimeout(() => {
+      introScrollLockRef.current = null;
+    }, 760);
+  }
+
+  function dismissVoiceGuide() {
+    setVoiceGuideDismissed(true);
+    try {
+      localStorage.setItem(voiceGuideStorageKey, 'true');
+    } catch {
+      // Ignore storage failures; the guide can safely reappear next session.
+    }
+  }
+
+  function handleVoiceFilterModeChange(enabled: boolean) {
+    setVoiceFilterMode(enabled);
+    dismissVoiceGuide();
+  }
+
+  function resetManualEditTracking(baseText: string) {
+    manualEditBaseRef.current = baseText;
+    hasManualEditRef.current = false;
+  }
+
+  function handleInputTextChange(value: string) {
+    setInputText(value);
+    setProcessedText('');
+    setProcessingSource('');
+    setProcessingLatencyMS(null);
+    hasManualEditRef.current = value.trim() !== manualEditBaseRef.current.trim();
+  }
+
+  function getManualEditCommitFields(finalText: string) {
+    const shouldLearnHotwords =
+      hasManualEditRef.current &&
+      manualEditBaseRef.current.trim() !== '' &&
+      finalText.trim() !== manualEditBaseRef.current.trim();
+
+    return {
+      learn_hotwords: shouldLearnHotwords,
+      ...(shouldLearnHotwords ? { manual_edit_base: manualEditBaseRef.current } : {}),
+    };
+  }
 
   async function checkHealth() {
     setHealthState('checking');
@@ -515,6 +660,7 @@ function App() {
           original_text: rawFinalText,
           enhanced_text: enhancedText || inputBaseline,
           final_text: inputText,
+          ...getManualEditCommitFields(inputText),
           request_id: requestID,
         }),
       });
@@ -532,6 +678,7 @@ function App() {
       setProcessedText(payload.text ?? '');
       setProcessingSource(payload.source ?? '');
       setProcessingLatencyMS(payload.latency_ms ?? null);
+      resetManualEditTracking(inputText);
       setCommitMessage(`${text.autoProcessed}${payload.mappings?.length ? `\uff0c${payload.mappings.length} \u6761\u66ff\u6362` : ''}`);
       if (payload.mappings?.length) {
         setLearnedMappings(payload.mappings);
@@ -584,6 +731,8 @@ function App() {
           original_text: cleanText,
           enhanced_text: cleanText,
           final_text: cleanText,
+          learn_hotwords: false,
+          apply_hotwords: true,
           request_id: requestID,
         }),
       });
@@ -606,13 +755,17 @@ function App() {
         outputLength: output.length,
         outputPreview: output.slice(0, 80),
       });
-      setInputBaseline(cleanText);
-      setEnhancedText(cleanText);
+      setInputBaseline(output);
+      setEnhancedText(output);
       setInputText(output);
+      resetManualEditTracking(output);
       setProcessedText(output);
       setProcessingState('completed');
       setProcessingSource(payload.source ?? '');
       setProcessingLatencyMS(payload.latency_ms ?? null);
+      if (payload.mappings?.length) {
+        setLearnedMappings(payload.mappings);
+      }
       setCommitMessage(text.autoProcessed);
     } catch (err) {
       debugLog('voice filter: commit input failed', err instanceof Error ? err.message : err);
@@ -655,6 +808,7 @@ function App() {
     setLiveText('');
     setInputText('');
     setInputBaseline('');
+    resetManualEditTracking('');
     setProcessedText('');
     setRawFinalText('');
     setEnhancedText('');
@@ -675,6 +829,7 @@ function App() {
     voiceFrameCountRef.current = 0;
     filteredFrameCountRef.current = 0;
     finalSegmentsRef.current = [];
+    resetVoiceFilterState();
     commitSeqRef.current += 1;
     lastCommittedKeyRef.current = '';
     inFlightCommitKeyRef.current = null;
@@ -693,13 +848,13 @@ function App() {
       debugLog('audio context prepared', { state: audioContext.state, sampleRate: audioContext.sampleRate });
 
       if (voiceFilterMode) {
-        audioBufferRef.current = [];
         startAudioProcessingForFilter(mediaStream);
         return;
       }
 
+      const realtimeMode = voiceFilterMode ? 'raw' : mode;
       const ws = new WebSocket(
-        `${toWebSocketBase(apiBaseUrl)}/ws/asr?user_id=${encodeURIComponent(userID)}&mode=${encodeURIComponent(mode)}`,
+        `${toWebSocketBase(apiBaseUrl)}/ws/asr?user_id=${encodeURIComponent(userID)}&mode=${encodeURIComponent(realtimeMode)}`,
       );
       ws.binaryType = 'arraybuffer';
       wsRef.current = ws;
@@ -766,7 +921,8 @@ function App() {
         setRawFinalText(joined);
         setLiveText(joined);
       } else {
-        setLiveText(`${finalSegmentsRef.current.join('')}${message.text}`);
+        const draft = `${finalSegmentsRef.current.join('')}${message.text}`;
+        setLiveText(draft);
       }
       return;
     }
@@ -779,6 +935,9 @@ function App() {
     }
 
     if (message.type === 'input_ready') {
+      if (voiceFilterMode && voiceFilterAppliedTextRef.current) {
+        return;
+      }
       const original = message.original_text ?? rawFinalText;
       const enhanced = message.enhanced_text ?? message.text ?? original;
       const input = message.text ?? enhanced;
@@ -786,18 +945,23 @@ function App() {
       setEnhancedText(enhanced);
       setInputBaseline(enhanced);
       setInputText(input);
+      resetManualEditTracking(input);
       setProcessedText('');
       setProcessingState('idle');
       setProcessingSource('');
       setProcessingLatencyMS(null);
       setCommitMessage(text.autoWaiting);
       if (message.mappings?.length) {
+        setLearnedMappings(message.mappings);
         void loadHotwords();
       }
       return;
     }
 
     if (message.type === 'processed') {
+      if (voiceFilterMode && voiceFilterAppliedTextRef.current) {
+        return;
+      }
       const output = message.text ?? '';
       setProcessingState('completed');
       setProcessingSource(message.source ?? '');
@@ -806,9 +970,11 @@ function App() {
       setEnhancedText(message.enhanced_text ?? '');
       setInputBaseline(message.enhanced_text ?? output);
       setInputText(output);
+      resetManualEditTracking(output);
       setProcessedText(output);
       setCommitMessage(text.autoProcessed);
       if (message.mappings?.length) {
+        setLearnedMappings(message.mappings);
         void loadHotwords();
       }
       return;
@@ -854,6 +1020,13 @@ function App() {
     }
 
     setRecordingStateSafe('completed');
+  }
+
+  function resetVoiceFilterState() {
+    audioBufferRef.current = [];
+    voiceFilterAppliedTextRef.current = '';
+    setVoiceFilterLoading(false);
+    setVoiceFilterResult(null);
   }
 
   async function processVoiceFilterAudio() {
@@ -929,7 +1102,10 @@ function App() {
       });
       setSelectedSpeaker(firstSpeakerID === null ? 'all' : String(firstSpeakerID));
       setRawFinalText(userText);
+      setEnhancedText(userText);
+      setInputBaseline(userText);
       setInputText(userText);
+      resetManualEditTracking(userText);
       setLiveText(userText);
       setCommitMessage(firstSpeakerID === null ? text.autoWaiting : text.voiceFilterApplied);
       debugLog('voice filter: wrote filtered text before commit', {
@@ -1016,6 +1192,9 @@ function App() {
       const downsampled = downsample(input, audioContext.sampleRate, targetSampleRate);
       const pcm = encodePCM16(downsampled);
       ws.send(pcm);
+      if (voiceFilterMode) {
+        audioBufferRef.current.push(downsampled);
+      }
 
       if (voiceFrameCountRef.current % realtimeUIUpdateEveryFrames === 0) {
         const normalizedLevel = normalizeVoiceLevel(level, peakLevel);
@@ -1083,6 +1262,7 @@ function App() {
     setLiveText('');
     setInputText('');
     setInputBaseline('');
+    resetManualEditTracking('');
     setProcessedText('');
     setRawFinalText('');
     setEnhancedText('');
@@ -1093,6 +1273,7 @@ function App() {
     setError(null);
     setWaveLevels(createSilentWave());
     finalSegmentsRef.current = [];
+    resetManualEditTracking('');
     latestInputKeyRef.current = '';
     lastCommittedKeyRef.current = '';
     inFlightCommitKeyRef.current = null;
@@ -1111,12 +1292,107 @@ function App() {
     }
   }
 
-  if (showIntro) {
-    const activeIntro = introScenarios[introScene];
+  function renderIntroDemo(scene: IntroScene) {
+    const demo = introScenarios[scene];
 
     return (
-      <main className="intro-shell">
-        <section className="intro-hero">
+      <section className="intro-demo-stage">
+        <div className="intro-demo-top">
+          <div>
+            <span>{demo.eyebrow}</span>
+            <strong>
+              {demo.titleLines.map((line) => (
+                <span key={line}>{line}</span>
+              ))}
+            </strong>
+          </div>
+          <em>{demo.proof}</em>
+        </div>
+
+        <div className="intro-waveform" aria-hidden="true">
+          {Array.from({ length: 56 }, (_, i) => (
+            <i
+              key={i}
+              style={{
+                '--level': `${0.2 + Math.abs(Math.sin(i * 0.42)) * 0.64}`,
+                '--delay': `${i * 24}ms`,
+              } as CSSProperties}
+            />
+          ))}
+        </div>
+
+        <div className={`intro-effect-layer ${scene}`}>
+          {scene === 'polish' ? (
+            <div className="intro-token-stream" aria-label="改口清理演示">
+              <span>今天是</span>
+              <span className="muted">星期一</span>
+              <span className="muted">不对</span>
+              <span className="keep">星期二</span>
+              <span>下午三点</span>
+              <span className="muted">那个</span>
+              <span>同步需求</span>
+            </div>
+          ) : null}
+          {scene === 'memory' ? (
+            <div className="intro-memory-demo" aria-label="热词记忆演示">
+              <div className="memory-edit">
+                <span>张立</span>
+                <i>编辑为</i>
+                <strong>张莉</strong>
+              </div>
+              <div className="memory-vault">
+                <Brain size={18} aria-hidden="true" />
+                <span>本地记忆已更新</span>
+                <em>下次自动替换</em>
+              </div>
+            </div>
+          ) : null}
+          {scene === 'voice' ? (
+            <div className="intro-speaker-demo" aria-label="声纹过滤演示">
+              <div className="speaker-lane primary">
+                <span>我</span>
+                <i />
+                <strong>明天发版本，重点看热词命中。</strong>
+              </div>
+              <div className="speaker-lane muted">
+                <span>周围人</span>
+                <i />
+                <strong>帮我拿杯咖啡。</strong>
+              </div>
+            </div>
+          ) : null}
+        </div>
+
+        <div className="intro-pipeline">
+          <article className="intro-transcript-card">
+            <span>实时听到</span>
+            <p>{demo.raw}</p>
+          </article>
+          <div className="intro-process-rail" aria-hidden="true">
+            <span />
+            <Check size={18} />
+            <span />
+          </div>
+          <article className="intro-transcript-card final">
+            <span>VoxMem 输出</span>
+            <p>{demo.output}</p>
+          </article>
+        </div>
+
+        <p className="intro-demo-desc">{demo.description}</p>
+      </section>
+    );
+  }
+
+  if (showIntro) {
+    return (
+      <main className="intro-shell" onWheel={handleIntroWheel}>
+        <section
+          ref={(node) => {
+            introSectionRefs.current[0] = node;
+          }}
+          className="intro-page-section intro-hero"
+        >
           <div className="intro-copy">
             <span className="intro-kicker">
               <span className={`intro-live-dot status-${healthState}`} />
@@ -1136,7 +1412,7 @@ function App() {
                     key={item.key}
                     type="button"
                     className={introScene === item.key ? 'active' : ''}
-                    onClick={() => setIntroScene(item.key)}
+                    onClick={() => focusIntroScene(item.key)}
                   >
                     <Icon size={18} aria-hidden="true" />
                     <span>{item.label}</span>
@@ -1154,92 +1430,7 @@ function App() {
           </div>
 
           <div className="intro-product" aria-live="polite">
-            <section className="intro-demo-stage">
-              <div className="intro-demo-top">
-                <div>
-                  <span>{activeIntro.eyebrow}</span>
-                  <strong>
-                    {activeIntro.titleLines.map((line) => (
-                      <span key={line}>{line}</span>
-                    ))}
-                  </strong>
-                </div>
-                <em>{activeIntro.proof}</em>
-              </div>
-
-              <div className="intro-waveform" aria-hidden="true">
-                {Array.from({ length: 56 }, (_, i) => (
-                  <i
-                    key={i}
-                    style={{
-                      '--level': `${0.2 + Math.abs(Math.sin(i * 0.42)) * 0.64}`,
-                      '--delay': `${i * 24}ms`,
-                    } as CSSProperties}
-                  />
-                ))}
-              </div>
-
-              <div className={`intro-effect-layer ${introScene}`}>
-                {introScene === 'polish' ? (
-                  <div className="intro-token-stream" aria-label="改口清理演示">
-                    <span>今天是</span>
-                    <span className="muted">星期一</span>
-                    <span className="muted">不对</span>
-                    <span className="keep">星期二</span>
-                    <span>下午三点</span>
-                    <span className="muted">那个</span>
-                    <span>同步需求</span>
-                  </div>
-                ) : null}
-                {introScene === 'memory' ? (
-                  <div className="intro-memory-demo" aria-label="热词记忆演示">
-                    <div className="memory-edit">
-                      <span>张立</span>
-                      <i>编辑为</i>
-                      <strong>张莉</strong>
-                    </div>
-                    <div className="memory-vault">
-                      <Brain size={18} aria-hidden="true" />
-                      <span>本地记忆已更新</span>
-                      <em>下次自动替换</em>
-                    </div>
-                  </div>
-                ) : null}
-                {introScene === 'voice' ? (
-                  <div className="intro-speaker-demo" aria-label="声纹过滤演示">
-                    <div className="speaker-lane primary">
-                      <span>我</span>
-                      <i />
-                      <strong>明天发版本，重点看热词命中。</strong>
-                    </div>
-                    <div className="speaker-lane muted">
-                      <span>周围人</span>
-                      <i />
-                      <strong>帮我拿杯咖啡。</strong>
-                    </div>
-                  </div>
-                ) : null}
-              </div>
-
-              <div className="intro-pipeline">
-                <article className="intro-transcript-card">
-                  <span>实时听到</span>
-                  <p>{activeIntro.raw}</p>
-                </article>
-                <div className="intro-process-rail" aria-hidden="true">
-                  <span />
-                  <Check size={18} />
-                  <span />
-                </div>
-                <article className="intro-transcript-card final">
-                  <span>VoxMem 输出</span>
-                  <p>{activeIntro.output}</p>
-                </article>
-              </div>
-
-              <p className="intro-demo-desc">{activeIntro.description}</p>
-            </section>
-
+            {renderIntroDemo(introScene)}
             <section className="intro-proof-grid">
               <article className={introScene === 'polish' ? 'active' : ''}>
                 <Sparkles size={22} aria-hidden="true" />
@@ -1266,22 +1457,62 @@ function App() {
           </div>
         </section>
 
-        <section className="intro-scenario-strip" aria-label="真实场景">
-          <article>
-            <span>01</span>
-            <strong>会议纪要</strong>
-            <p>边说边修正，最终只留下确认后的事项。</p>
-          </article>
-          <article>
-            <span>02</span>
-            <strong>专属词库</strong>
-            <p>常用同事名、客户名、项目代号越用越准。</p>
-          </article>
-          <article>
-            <span>03</span>
-            <strong>嘈杂环境</strong>
-            <p>旁边人的插话不会轻易混入你的正文。</p>
-          </article>
+        {introFeatureCards.map((card, index) => (
+          <section
+            key={card.key}
+            ref={(node) => {
+              introStoryRefs.current[index] = node;
+              introSectionRefs.current[index + 1] = node;
+            }}
+            data-scene={card.key}
+            className={`intro-page-section intro-story-panel ${introScene === card.key ? 'active' : ''}`}
+          >
+            <div className="intro-story-copy">
+              <span>{card.label}</span>
+              <h2>{card.title}</h2>
+              <p>{card.body}</p>
+              <em>{card.metric}</em>
+              <button type="button" className="intro-primary" onClick={() => setShowIntro(false)}>
+                进入语音工作台
+                <Send size={20} aria-hidden="true" />
+              </button>
+            </div>
+            <div className="intro-product">{renderIntroDemo(card.key)}</div>
+          </section>
+        ))}
+
+        <section
+          ref={(node) => {
+            introSectionRefs.current[introFeatureCards.length + 1] = node;
+          }}
+          className="intro-page-section intro-scenarios-page"
+        >
+          <div className="intro-story-copy">
+            <span>04 / 真实场景</span>
+            <h2>常见办公口述，不需要重新整理一遍</h2>
+            <p>会议、词库和嘈杂环境三个入口，会自然连接到同一个语音工作台。</p>
+            <button type="button" className="intro-primary" onClick={() => setShowIntro(false)}>
+              进入语音工作台
+              <Send size={20} aria-hidden="true" />
+            </button>
+          </div>
+          <section className="intro-scenario-strip" aria-label="真实场景">
+            <article>
+              <span>01</span>
+              <strong>会议纪要</strong>
+              <p>边说边修正，最终只留下确认后的事项。</p>
+            </article>
+            <article>
+              <span>02</span>
+              <strong>专属词库</strong>
+              <p>常用同事名、客户名、项目代号越用越准。</p>
+            </article>
+            <article>
+              <span>03</span>
+              <strong>嘈杂环境</strong>
+              <p>旁边人的插话不会轻易混入你的正文。</p>
+            </article>
+          </section>
         </section>
       </main>
     );
@@ -1331,7 +1562,7 @@ function App() {
             <input
               type="checkbox"
               checked={voiceFilterMode}
-              onChange={(event) => setVoiceFilterMode(event.target.checked)}
+              onChange={(event) => handleVoiceFilterModeChange(event.target.checked)}
               disabled={isRecordingActive}
             />
             <span>{text.voiceFilter}</span>
@@ -1381,12 +1612,7 @@ function App() {
                 <textarea
                   aria-label={text.inputTextAria}
                   value={inputText}
-                  onChange={(event) => {
-                    setInputText(event.target.value);
-                    setProcessedText('');
-                    setProcessingSource('');
-                    setProcessingLatencyMS(null);
-                  }}
+                  onChange={(event) => handleInputTextChange(event.target.value)}
                   onBlur={handleInputBlur}
                   placeholder={text.inputPlaceholder}
                   rows={4}
@@ -1428,6 +1654,7 @@ function App() {
                   const all = voiceFilterResult.sentences.map((sentence) => sentence.text).join('');
                   setRawFinalText(all);
                   setInputText(all);
+                  resetManualEditTracking(all);
                   setLiveText(all);
                 }}>
                   {'\u663e\u793a\u5168\u90e8'}
@@ -1441,7 +1668,8 @@ function App() {
                 type="button"
                 disabled={!canUseRecordButton}
                 onClick={toggleRecording}
-                title={text.startRecordingTitle}
+                aria-label={isRecordingActive ? text.stopRecordingTitle : text.startRecordingTitle}
+                title={isRecordingActive ? text.stopRecordingTitle : text.startRecordingTitle}
               >
                 {isRecordingActive ? <Square size={28} aria-hidden="true" /> : <Mic size={30} aria-hidden="true" />}
               </button>
@@ -1490,7 +1718,7 @@ function App() {
               </div>
             ) : null}
 
-            <section className="voice-processing-card">
+            <section className={!voiceGuideDismissed ? 'voice-processing-card has-guide' : 'voice-processing-card'}>
               <div className="pane-heading">
                 <h2><Mic size={18} aria-hidden="true" />{text.voiceProcessing}</h2>
               </div>
@@ -1500,11 +1728,21 @@ function App() {
                   <input
                     type="checkbox"
                     checked={voiceFilterMode}
-                    onChange={(event) => setVoiceFilterMode(event.target.checked)}
+                    onChange={(event) => handleVoiceFilterModeChange(event.target.checked)}
                     disabled={isRecordingActive}
                   />
                 </label>
               </div>
+              {!voiceGuideDismissed ? (
+                <div className="coachmark voice-filter-guide" role="note" aria-label="去除周围人声功能说明">
+                  <span>新功能</span>
+                  <strong>{text.voiceFilter}</strong>
+                  <p>会议室或旁边有人说话时打开，录音结束后会先分离说话人，只保留主要说话人的内容。</p>
+                  <button type="button" onClick={dismissVoiceGuide}>
+                    知道了
+                  </button>
+                </div>
+              ) : null}
             </section>
 
             <section className="mode-card">
@@ -1515,7 +1753,6 @@ function App() {
                 {([
                   { key: 'raw' as OutputMode, label: '\u539f\u58f0', desc: '\u4ec5\u672c\u5730\u8bb0\u5fc6\u66ff\u6362\uff0c\u4e0d\u8c03\u7528 AI' },
                   { key: 'polish' as OutputMode, label: '\u8f7b\u6574\u7406', desc: 'AI \u4fee\u6b63\u6539\u53e3\u3001\u53bb\u53e3\u5934\u7985' },
-                  { key: 'markdown' as OutputMode, label: 'Markdown', desc: '\u8f7b\u6574\u7406 + \u5217\u8868\u683c\u5f0f\u5316' },
                 ]).map((opt) => (
                   <button
                     key={opt.key}

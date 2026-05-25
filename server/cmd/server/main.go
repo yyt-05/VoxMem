@@ -80,6 +80,7 @@ func main() {
 		os.Exit(1)
 	}
 	defer store.Close()
+	logStartupConfig(logger, cfg)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", healthzHandler(cfg))
@@ -88,6 +89,7 @@ func main() {
 	mux.HandleFunc("POST /api/correction", correctionHandler(store, logger))
 	mux.HandleFunc("GET /api/hotwords", hotwordsHandler(store, logger))
 	mux.HandleFunc("DELETE /api/hotwords/{id}", deleteHotwordHandler(store, logger))
+	mux.HandleFunc("GET /api/metrics/summary", metricsSummaryHandler(store, logger))
 	mux.HandleFunc("GET /api/preferences", preferencesHandler(store, logger))
 	mux.HandleFunc("DELETE /api/preferences/{key}", deletePreferenceHandler(store, logger))
 	mux.HandleFunc("POST /api/transcribe/file", fileTranscribeHandler(cfg, logger))
@@ -171,6 +173,53 @@ func loadConfig() config {
 		kodoURLTTL:        time.Duration(getenvInt("VOXMEM_KODO_URL_TTL_SECONDS", 3600)) * time.Second,
 		kodoUploadPrefix:  getenv("VOXMEM_KODO_UPLOAD_PREFIX", "audio/"),
 	}
+}
+
+func logStartupConfig(logger *slog.Logger, cfg config) {
+	logger.Info("startup config",
+		"addr", cfg.addr,
+		"env", cfg.env,
+		"asr_mode", cfg.asrMode,
+		"dashscope_configured", cfg.asrAPIKey != "",
+		"llm_configured", llmConfigured(cfg),
+		"llm_base_url_configured", cfg.llmBaseURL != "",
+		"llm_model", displayConfigValue(cfg.llmModel),
+		"llm_timeout_seconds", int(cfg.llmTimeout.Seconds()),
+		"kodo_configured", kodoConfigured(cfg),
+		"kodo_bucket", displayConfigValue(cfg.kodoBucket),
+		"kodo_domain_configured", cfg.kodoDomain != "",
+		"db_path", cfg.dbPath,
+		"audio_debug", cfg.audioDebug,
+		"allowed_origins", len(cfg.allowedOrigins),
+	)
+	if !llmConfigured(cfg) {
+		logger.Warn("LLM is not fully configured; polish and markdown modes will fail or fall back to editable text",
+			"api_key_configured", cfg.llmAPIKey != "",
+			"base_url_configured", cfg.llmBaseURL != "",
+			"model_configured", cfg.llmModel != "",
+		)
+	}
+}
+
+func llmConfigured(cfg config) bool {
+	return strings.TrimSpace(cfg.llmAPIKey) != "" &&
+		strings.TrimSpace(cfg.llmBaseURL) != "" &&
+		strings.TrimSpace(cfg.llmModel) != ""
+}
+
+func kodoConfigured(cfg config) bool {
+	return strings.TrimSpace(cfg.kodoAccessKey) != "" &&
+		strings.TrimSpace(cfg.kodoSecretKey) != "" &&
+		strings.TrimSpace(cfg.kodoBucket) != "" &&
+		strings.TrimSpace(cfg.kodoDomain) != ""
+}
+
+func displayConfigValue(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "<unset>"
+	}
+	return value
 }
 
 func healthzHandler(cfg config) http.HandlerFunc {
@@ -474,6 +523,82 @@ func finalizeOutput(ctx context.Context, cfg config, logger *slog.Logger, store 
 		return
 	}
 
+	if mode == textproc.ModePolish || mode == textproc.ModeMarkdown {
+		_ = clientConn.WriteJSON(clientEvent{Type: "processing", TaskID: taskID, Mode: mode, OriginalText: originalText, EnhancedText: enhancedText})
+
+		formatHint := getFormatHint(ctx, store, userID)
+		logger.Info("llm processing started",
+			"flow", "asr",
+			"task_id", taskID,
+			"user_id", userID,
+			"mode", mode,
+			"llm_configured", llmConfigured(cfg),
+			"model", displayConfigValue(cfg.llmModel),
+			"input_len", len([]rune(enhancedText)),
+			"format_hint", formatHint != "",
+			"input_preview", truncateLogValue(enhancedText, 120),
+		)
+		result, err := textproc.Process(ctx, textproc.Config{
+			APIKey:  cfg.llmAPIKey,
+			BaseURL: cfg.llmBaseURL,
+			Model:   cfg.llmModel,
+			Timeout: cfg.llmTimeout,
+		}, mode, enhancedText, formatHint)
+
+		if err != nil {
+			logger.Warn("llm processing in asr flow failed", "task_id", taskID, "mode", mode, "input_len", len([]rune(enhancedText)), "error", err)
+			_ = clientConn.WriteJSON(clientEvent{
+				Type:         "input_ready",
+				TaskID:       taskID,
+				Text:         enhancedText,
+				Final:        true,
+				Mode:         mode,
+				Status:       "ready",
+				Source:       "local",
+				OriginalText: originalText,
+				EnhancedText: enhancedText,
+				Mappings:     hits,
+			})
+			_ = clientConn.WriteJSON(clientEvent{Type: "done", TaskID: taskID})
+			return
+		}
+		logger.Info("llm processing completed",
+			"flow", "asr",
+			"task_id", taskID,
+			"user_id", userID,
+			"mode", mode,
+			"status", result.Status,
+			"source", result.Source,
+			"latency_ms", result.LatencyMS,
+			"input_len", len([]rune(enhancedText)),
+			"output_len", len([]rune(result.Text)),
+			"changed", strings.TrimSpace(result.Text) != strings.TrimSpace(enhancedText),
+			"output_preview", truncateLogValue(result.Text, 120),
+		)
+
+		if result.Source == "llm" {
+			if prefsErr := store.SaveFormatPreferences(ctx, userID, result.Text, enhancedText); prefsErr != nil {
+				logger.Warn("save format preferences failed", "user_id", userID, "error", prefsErr)
+			}
+		}
+
+		_ = clientConn.WriteJSON(clientEvent{
+			Type:         "processed",
+			TaskID:       taskID,
+			Text:         result.Text,
+			Final:        true,
+			Mode:         mode,
+			Status:       result.Status,
+			Source:       result.Source,
+			LatencyMS:    result.LatencyMS,
+			OriginalText: originalText,
+			EnhancedText: enhancedText,
+			Mappings:     hits,
+		})
+		_ = clientConn.WriteJSON(clientEvent{Type: "done", TaskID: taskID})
+		return
+	}
+
 	if err := clientConn.WriteJSON(clientEvent{
 		Type:         "input_ready",
 		TaskID:       taskID,
@@ -493,13 +618,16 @@ func finalizeOutput(ctx context.Context, cfg config, logger *slog.Logger, store 
 }
 
 type inputCommitRequest struct {
-	UserID       string        `json:"user_id"`
-	SessionID    string        `json:"session_id"`
-	Mode         textproc.Mode `json:"mode"`
-	OriginalText string        `json:"original_text"`
-	EnhancedText string        `json:"enhanced_text"`
-	FinalText    string        `json:"final_text"`
-	RequestID    string        `json:"request_id,omitempty"`
+	UserID         string        `json:"user_id"`
+	SessionID      string        `json:"session_id"`
+	Mode           textproc.Mode `json:"mode"`
+	OriginalText   string        `json:"original_text"`
+	EnhancedText   string        `json:"enhanced_text"`
+	FinalText      string        `json:"final_text"`
+	LearnHotwords  *bool         `json:"learn_hotwords,omitempty"`
+	ApplyHotwords  *bool         `json:"apply_hotwords,omitempty"`
+	ManualEditBase string        `json:"manual_edit_base,omitempty"`
+	RequestID      string        `json:"request_id,omitempty"`
 }
 
 type inputCommitResponse struct {
@@ -544,14 +672,22 @@ func inputCommitHandler(cfg config, store *memory.Store, logger *slog.Logger) ht
 		if baselineText == "" {
 			baselineText = originalText
 		}
+		manualEditBase := strings.TrimSpace(request.ManualEditBase)
+		shouldLearnHotwords := true
+		if request.LearnHotwords != nil {
+			shouldLearnHotwords = *request.LearnHotwords
+		}
+		if manualEditBase == "" {
+			manualEditBase = baselineText
+		}
 
 		mappings := []memory.Mapping{}
-		if baselineText != "" && finalText != baselineText {
+		if shouldLearnHotwords && manualEditBase != "" && finalText != manualEditBase {
 			mappings, err = store.SaveCorrection(r.Context(), memory.Correction{
 				UserID:        userID,
 				SessionID:     request.SessionID,
 				OriginalText:  originalText,
-				EnhancedText:  enhancedText,
+				EnhancedText:  manualEditBase,
 				CorrectedText: finalText,
 			})
 			if err != nil {
@@ -565,20 +701,47 @@ func inputCommitHandler(cfg config, store *memory.Store, logger *slog.Logger) ht
 			return
 		}
 
+		processingInput := finalText
+		if request.ApplyHotwords != nil && *request.ApplyHotwords {
+			appliedText, hits, err := store.ApplyMappings(r.Context(), userID, finalText)
+			if err != nil {
+				logger.Warn("apply input hotwords failed", "user_id", userID, "request_id", request.RequestID, "error", err)
+				writeError(w, http.StatusBadRequest, err)
+				return
+			}
+			processingInput = appliedText
+			if len(hits) > 0 {
+				mappings = append(mappings, hits...)
+			}
+		}
+
 		result, err := textproc.Process(r.Context(), textproc.Config{
 			APIKey:  cfg.llmAPIKey,
 			BaseURL: cfg.llmBaseURL,
 			Model:   cfg.llmModel,
 			Timeout: cfg.llmTimeout,
-		}, mode, finalText, getFormatHint(r.Context(), store, userID))
+		}, mode, processingInput, getFormatHint(r.Context(), store, userID))
 		if err != nil {
-			logger.Warn("input text processing failed", "user_id", userID, "mode", mode, "request_id", request.RequestID, "error", err)
+			logger.Warn("input text processing failed", "user_id", userID, "mode", mode, "request_id", request.RequestID, "input_len", len([]rune(processingInput)), "llm_configured", llmConfigured(cfg), "error", err)
 			writeError(w, http.StatusBadRequest, err)
 			return
 		}
+		logger.Info("input text processing completed",
+			"user_id", userID,
+			"mode", mode,
+			"request_id", request.RequestID,
+			"status", result.Status,
+			"source", result.Source,
+			"latency_ms", result.LatencyMS,
+			"input_len", len([]rune(processingInput)),
+			"output_len", len([]rune(result.Text)),
+			"changed", strings.TrimSpace(result.Text) != strings.TrimSpace(processingInput),
+			"input_preview", truncateLogValue(processingInput, 120),
+			"output_preview", truncateLogValue(result.Text, 120),
+		)
 
 		if result.Source == "llm" {
-			if err := store.SaveFormatPreferences(r.Context(), userID, result.Text, finalText); err != nil {
+			if err := store.SaveFormatPreferences(r.Context(), userID, result.Text, processingInput); err != nil {
 				logger.Warn("save format preferences failed", "user_id", userID, "error", err)
 			}
 		}
@@ -668,6 +831,20 @@ func deleteHotwordHandler(store *memory.Store, logger *slog.Logger) http.Handler
 		}
 
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	}
+}
+
+func metricsSummaryHandler(store *memory.Store, logger *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		userID := strings.TrimSpace(r.URL.Query().Get("user_id"))
+		summary, err := store.QualitySummary(r.Context(), userID)
+		if err != nil {
+			logger.Warn("read metrics summary failed", "user_id", userID, "error", err)
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, summary)
 	}
 }
 
