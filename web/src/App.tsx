@@ -6,7 +6,6 @@
   FileText,
   Mic,
   RefreshCw,
-  Save,
   Send,
   Server,
   Settings,
@@ -14,7 +13,6 @@
   Square,
   Trash2,
   X,
-  Zap,
 } from 'lucide-react';
 import { type CSSProperties, useEffect, useMemo, useRef, useState } from 'react';
 
@@ -27,7 +25,6 @@ declare global {
 type HealthState = 'checking' | 'ok' | 'error';
 type RecordingState = 'idle' | 'connecting' | 'recording' | 'stopping' | 'completed' | 'error';
 type OutputMode = 'polish' | 'raw' | 'markdown';
-type CleanupOptionKey = 'hotword' | 'revision' | 'filler' | 'markdown' | 'paragraph';
 type ProcessingState = 'idle' | 'processing' | 'completed' | 'failed';
 
 type HealthPayload = {
@@ -92,6 +89,27 @@ type InputCommitResponse = {
   error?: string;
 };
 
+type RecentCorrectionMetric = {
+  id: number;
+  session_id?: string;
+  original_text: string;
+  enhanced_text?: string;
+  corrected_text: string;
+  edit_distance: number;
+  edit_rate: number;
+  created_at: string;
+};
+
+type MetricsSummary = {
+  correction_count: number;
+  average_edit_rate: number;
+  hotword_count: number;
+  hotword_hit_count: number;
+  hotword_learned_count: number;
+  recent_corrections?: RecentCorrectionMetric[];
+  error?: string;
+};
+
 type RecorderStats = {
   frames: number;
   bytes: number;
@@ -112,18 +130,50 @@ type FileTranscribeSentence = {
   speaker_id: number;
 };
 
+type IntroScene = 'polish' | 'memory' | 'voice';
+
+const introSceneOrder: IntroScene[] = ['polish', 'memory', 'voice'];
+
+const introScenarios: Record<IntroScene, {
+  eyebrow: string;
+  titleLines: string[];
+  description: string;
+  raw: string;
+  output: string;
+  proof: string;
+}> = {
+  polish: {
+    eyebrow: '口述里的反悔，自动收掉',
+    titleLines: ['把“星期一，不对星期二”', '直接变成可用文字'],
+    description: '实时识别不只是转写。VoxMem 会识别改口、重复和口头填充，把最终意图留在输入框里。',
+    raw: '今天是星期一，不对，今天是星期二，那个下午三点同步下需求。',
+    output: '今天是星期二，下午三点同步需求。',
+    proof: '删除改口与口头禅',
+  },
+  memory: {
+    eyebrow: '编辑一次，下次记住',
+    titleLines: ['专属人名和热词', '会进入本地记忆'],
+    description: '你把“张立”改成“张莉”后，同一个用户后续再说到这个名字会优先走本地替换。',
+    raw: '今天去找张立开会，顺便确认声纹过滤方案。',
+    output: '今天去找张莉开会，顺便确认声纹过滤方案。',
+    proof: '张立 -> 张莉 已学习',
+  },
+  voice: {
+    eyebrow: '别人插话，不抢你的稿子',
+    titleLines: ['声纹过滤先分离说话人', '再保留你的声音'],
+    description: '会议室、开放办公区和嘈杂环境里，VoxMem 会按说话人切分，减少旁边声音混进正文。',
+    raw: '我：明天发版本。旁人：帮我拿杯咖啡。我：重点看热词命中。',
+    output: '明天发版本，重点看热词命中。',
+    proof: '保留主说话人 2 段',
+  },
+};
+
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:8080';
 const targetSampleRate = 16000;
+const realtimeProcessorBufferSize = 1024;
+const voiceFilterProcessorBufferSize = 4096;
+const realtimeUIUpdateEveryFrames = 4;
 const debugEnabled = import.meta.env.DEV;
-const waveBarCount = 44;
-
-const cleanupOptions: Array<{ key: CleanupOptionKey; label: string }> = [
-  { key: 'hotword', label: '\u4e13\u6709\u8bcd\u7ea0\u9519' },
-  { key: 'revision', label: '\u4fee\u6b63\u6539\u53e3' },
-  { key: 'filler', label: '\u53bb\u53e3\u5934\u7985' },
-  { key: 'markdown', label: 'Markdown \u5217\u8868' },
-  { key: 'paragraph', label: '\u6bb5\u843d\u4f18\u5316' },
-];
 
 const text = {
   apiConnected: '\u0041\u0050\u0049 \u5df2\u8fde\u63a5',
@@ -174,6 +224,10 @@ const text = {
   inputDevice: '\u8f93\u5165\u8bbe\u5907',
   asrTask: 'ASR \u4efb\u52a1',
   voiceWave: '\u97f3\u6ce2',
+  voiceProcessing: '\u58f0\u97f3\u5904\u7406',
+  voiceFilter: '\u53bb\u9664\u5468\u56f4\u4eba\u58f0',
+  voiceFilterWorking: '\u6b63\u5728\u79bb\u7ebf\u8bc6\u522b\u5e76\u5206\u79bb\u8bf4\u8bdd\u4eba...',
+  voiceFilterApplied: '\u5df2\u6309\u9996\u4e2a\u8bf4\u8bdd\u4eba\u4fdd\u7559\u672c\u4eba\u58f0\u97f3',
   micSilent: '\u672a\u68c0\u6d4b\u5230\u9ea6\u514b\u98ce\u58f0\u97f3\uff0c\u8bf7\u68c0\u67e5\u6d4f\u89c8\u5668\u9ea6\u514b\u98ce\u6743\u9650\u548c\u8f93\u5165\u8bbe\u5907\u3002',
   errorPrefix: '\u9519\u8bef\uff1a',
   cannotConnectAPI: '\u65e0\u6cd5\u8fde\u63a5 API',
@@ -188,17 +242,11 @@ const text = {
 
 function App() {
   const [showIntro, setShowIntro] = useState(true);
+  const [introScene, setIntroScene] = useState<IntroScene>('polish');
   const [healthState, setHealthState] = useState<HealthState>('checking');
   const [health, setHealth] = useState<HealthPayload | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [mode] = useState<OutputMode>('polish');
-  const [enabledCleanupOptions, setEnabledCleanupOptions] = useState<Record<CleanupOptionKey, boolean>>({
-    hotword: true,
-    revision: true,
-    filler: true,
-    markdown: true,
-    paragraph: true,
-  });
+  const [mode, setMode] = useState<OutputMode>('polish');
   const [recordingState, setRecordingState] = useState<RecordingState>('idle');
   const [liveText, setLiveText] = useState('');
   const [inputText, setInputText] = useState('');
@@ -215,6 +263,9 @@ function App() {
   const [memoryManagerOpen, setMemoryManagerOpen] = useState(false);
   const [hotwords, setHotwords] = useState<HotwordMapping[]>([]);
   const [preferences, setPreferences] = useState<Preference[]>([]);
+  const [metricsOpen, setMetricsOpen] = useState(false);
+  const [metricsLoading, setMetricsLoading] = useState(false);
+  const [metricsSummary, setMetricsSummary] = useState<MetricsSummary | null>(null);
   const [userID] = useState(() => getUserID());
   const [taskId, setTaskId] = useState<string | null>(null);
   const [recorderStats, setRecorderStats] = useState<RecorderStats>({ frames: 0, bytes: 0, level: 0, peakLevel: 0 });
@@ -267,6 +318,13 @@ function App() {
   const displayedMappings = useMemo(() => {
     return learnedMappings.slice(0, 3);
   }, [learnedMappings]);
+  const currentEditRate = useMemo(() => {
+    const baseline = enhancedText || rawFinalText;
+    if (!baseline || !inputText || baseline === inputText) {
+      return 0;
+    }
+    return calculateTextEditRate(baseline, inputText);
+  }, [enhancedText, rawFinalText, inputText]);
 
   useEffect(() => {
     void checkHealth();
@@ -279,6 +337,32 @@ function App() {
       wsRef.current?.close();
     };
   }, []);
+
+  useEffect(() => {
+    debugLog('text state changed', {
+      rawFinalLength: rawFinalText.length,
+      inputTextLength: inputText.length,
+      processedTextLength: processedText.length,
+      enhancedTextLength: enhancedText.length,
+      processingState,
+      inputPreview: inputText.slice(0, 80),
+    });
+  }, [rawFinalText, inputText, processedText, enhancedText, processingState]);
+
+  useEffect(() => {
+    if (!showIntro) {
+      return undefined;
+    }
+
+    const timer = window.setInterval(() => {
+      setIntroScene((current) => {
+        const currentIndex = introSceneOrder.indexOf(current);
+        return introSceneOrder[(currentIndex + 1) % introSceneOrder.length];
+      });
+    }, 5200);
+
+    return () => window.clearInterval(timer);
+  }, [showIntro]);
 
   async function checkHealth() {
     setHealthState('checking');
@@ -345,6 +429,29 @@ function App() {
     }
   }
 
+  async function loadMetrics() {
+    setMetricsLoading(true);
+    try {
+      const response = await fetch(`${apiBaseUrl}/api/metrics/summary?user_id=${encodeURIComponent(userID)}`);
+      const payload = (await response.json()) as MetricsSummary;
+      if (!response.ok) {
+        throw new Error(payload.error || `HTTP ${response.status}`);
+      }
+      setMetricsSummary(payload);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setMetricsLoading(false);
+    }
+  }
+
+  function openMetricsDashboard() {
+    setMetricsOpen(true);
+    void checkHealth();
+    void loadHotwords();
+    void loadMetrics();
+  }
+
   async function deletePreference(key: string) {
     try {
       const response = await fetch(`${apiBaseUrl}/api/preferences/${encodeURIComponent(key)}?user_id=${encodeURIComponent(userID)}`, {
@@ -377,6 +484,7 @@ function App() {
     if (commitKey === lastCommittedKeyRef.current || commitKey === inFlightCommitKeyRef.current) {
       return;
     }
+    latestInputKeyRef.current = commitKey;
     void commitInput(commitKey);
   }
 
@@ -431,6 +539,9 @@ function App() {
         await loadHotwords();
         await loadPreferences();
       }
+      if (metricsOpen) {
+        await loadMetrics();
+      }
     } catch (err) {
       if (requestSeq !== commitSeqRef.current || commitKey !== latestInputKeyRef.current) {
         setProcessingState('idle');
@@ -444,6 +555,71 @@ function App() {
       if (inFlightCommitKeyRef.current === commitKey) {
         inFlightCommitKeyRef.current = null;
       }
+    }
+  }
+
+  async function processVoiceFilterInput(filteredText: string) {
+    const cleanText = filteredText.trim();
+    debugLog('voice filter: commit input start', { textLength: cleanText.length, preview: cleanText.slice(0, 80) });
+    if (!cleanText) {
+      debugLog('voice filter: commit input skipped empty text');
+      return;
+    }
+
+    const requestID = crypto.randomUUID();
+    setProcessingState('processing');
+    setProcessingSource('');
+    setProcessingLatencyMS(null);
+    setCommitMessage(text.autoProcessing);
+    setError(null);
+
+    try {
+      const response = await fetch(`${apiBaseUrl}/api/input/commit`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          user_id: userID,
+          session_id: taskId,
+          mode,
+          original_text: cleanText,
+          enhanced_text: cleanText,
+          final_text: cleanText,
+          request_id: requestID,
+        }),
+      });
+      debugLog('voice filter: commit response received', { status: response.status, ok: response.ok });
+      const payload = (await response.json()) as InputCommitResponse;
+      debugLog('voice filter: commit payload', {
+        status: payload.status,
+        textLength: payload.text?.length ?? 0,
+        source: payload.source,
+        latencyMS: payload.latency_ms,
+        mappings: payload.mappings?.length ?? 0,
+      });
+      if (!response.ok) {
+        throw new Error(payload.error || `HTTP ${response.status}`);
+      }
+
+      const output = payload.text || cleanText;
+      debugLog('voice filter: writing processed output', {
+        rawLength: cleanText.length,
+        outputLength: output.length,
+        outputPreview: output.slice(0, 80),
+      });
+      setInputBaseline(cleanText);
+      setEnhancedText(cleanText);
+      setInputText(output);
+      setProcessedText(output);
+      setProcessingState('completed');
+      setProcessingSource(payload.source ?? '');
+      setProcessingLatencyMS(payload.latency_ms ?? null);
+      setCommitMessage(text.autoProcessed);
+    } catch (err) {
+      debugLog('voice filter: commit input failed', err instanceof Error ? err.message : err);
+      setProcessingState('failed');
+      const message = err instanceof Error ? err.message : String(err);
+      setCommitMessage(message);
+      setError(message);
     }
   }
 
@@ -693,7 +869,7 @@ function App() {
 
     try {
       const totalLength = buffers.reduce((s, b) => s + b.length, 0);
-      setLiveText(`Voice filter: combining ${buffers.length} frames (${(totalLength / targetSampleRate).toFixed(1)}s)...`);
+      setLiveText('\u6b63\u5728\u6574\u7406\u5f55\u97f3...');
       const combined = new Float32Array(totalLength);
       let offset = 0;
       for (const buf of buffers) {
@@ -701,7 +877,7 @@ function App() {
         offset += buf.length;
       }
 
-      setLiveText('Voice filter: encoding WAV...');
+      setLiveText('\u6b63\u5728\u51c6\u5907\u79bb\u7ebf\u8bc6\u522b...');
       const inputSampleRate = voiceFilterSampleRateRef.current || targetSampleRate;
       const downsampled = downsample(combined, inputSampleRate, targetSampleRate);
       const wav = encodeWAV(downsampled, targetSampleRate);
@@ -714,7 +890,7 @@ function App() {
         durationS: (downsampled.length / targetSampleRate).toFixed(1),
       });
 
-      setLiveText('Voice filter: uploading audio...');
+      setLiveText(text.voiceFilterWorking);
       const response = await fetch(apiBaseUrl + '/api/transcribe/file', {
         method: 'POST',
         body: wav,
@@ -732,6 +908,11 @@ function App() {
 
       debugLog('voice filter: result', { sentences: payload.sentences?.length, speakers: payload.speaker_count });
       const sentences = payload.sentences || [];
+      debugLog('voice filter: sentences sample', sentences.slice(0, 5).map((sentence) => ({
+        speakerID: sentence.speaker_id,
+        textLength: sentence.text.length,
+        textPreview: sentence.text.slice(0, 50),
+      })));
       setVoiceFilterResult({
         sentences,
         speaker_count: payload.speaker_count || 0,
@@ -740,10 +921,22 @@ function App() {
       const userText = firstSpeakerID === null
         ? (payload.full_text || '')
         : textForSpeaker(sentences, firstSpeakerID);
+      debugLog('voice filter: selected user speaker', {
+        firstSpeakerID,
+        userTextLength: userText.length,
+        fullTextLength: payload.full_text?.length ?? 0,
+        userTextPreview: userText.slice(0, 80),
+      });
       setSelectedSpeaker(firstSpeakerID === null ? 'all' : String(firstSpeakerID));
       setRawFinalText(userText);
       setInputText(userText);
       setLiveText(userText);
+      setCommitMessage(firstSpeakerID === null ? text.autoWaiting : text.voiceFilterApplied);
+      debugLog('voice filter: wrote filtered text before commit', {
+        rawFinalLength: userText.length,
+        inputTextLength: userText.length,
+      });
+      await processVoiceFilterInput(userText);
     } catch (err) {
       debugLog('voice filter: failed', err instanceof Error ? err.message : err);
       setError(err instanceof Error ? err.message : String(err));
@@ -768,12 +961,30 @@ function App() {
     void audioContext.resume();
     voiceFilterSampleRateRef.current = audioContext.sampleRate;
     const source = audioContext.createMediaStreamSource(mediaStream);
-    const processor = audioContext.createScriptProcessor(4096, 1, 1);
+    const processor = audioContext.createScriptProcessor(voiceFilterProcessorBufferSize, 1, 1);
 
     processor.onaudioprocess = (event) => {
       if (recordingStateRef.current !== 'recording') return;
       const input = event.inputBuffer.getChannelData(0);
+      const level = calculateRMS(input);
+      const peakLevel = calculatePeak(input);
+      const normalizedLevel = normalizeVoiceLevel(level, peakLevel);
       audioBufferRef.current.push(new Float32Array(input));
+      setWaveLevels((levels) => [...levels.slice(1), normalizedLevel]);
+      setRecorderStats((stats) => ({
+        frames: stats.frames + 1,
+        bytes: stats.bytes + input.byteLength,
+        level,
+        peakLevel: Math.max(stats.peakLevel, peakLevel),
+      }));
+      if (debugEnabled && audioBufferRef.current.length % 80 === 1) {
+        debugLog('voice filter: audio buffered', {
+          buffers: audioBufferRef.current.length,
+          level,
+          peakLevel,
+          normalizedLevel,
+        });
+      }
     };
 
     source.connect(processor);
@@ -789,9 +1000,7 @@ function App() {
     audioContextRef.current = audioContext;
     void audioContext.resume();
     const source = audioContext.createMediaStreamSource(mediaStream);
-    const processor = audioContext.createScriptProcessor(4096, 1, 1);
-
-    const voiceFilterThreshold = 0.25;
+    const processor = audioContext.createScriptProcessor(realtimeProcessorBufferSize, 1, 1);
 
     processor.onaudioprocess = (event) => {
       if (ws.readyState !== WebSocket.OPEN || recordingStateRef.current !== 'recording') {
@@ -802,46 +1011,28 @@ function App() {
       const peakLevel = calculatePeak(input);
 
       voiceFrameCountRef.current += 1;
-      if (level > voiceBaselineRef.current * 1.2) {
-        voiceBaselineRef.current = level;
-      } else {
-        voiceBaselineRef.current *= 0.9998;
-      }
-
-      const normalizedLevel = normalizeVoiceLevel(level, peakLevel);
-      setWaveLevels((levels) => [...levels.slice(1), normalizedLevel]);
-
-      const voiceLearned = voiceBaselineRef.current > 0.0005 && voiceFrameCountRef.current > 30;
-      if (voiceLearned && level < voiceBaselineRef.current * voiceFilterThreshold) {
-        filteredFrameCountRef.current += 1;
-        if (filteredFrameCountRef.current % 20 === 1) {
-          setFilteredFrames(filteredFrameCountRef.current);
-        }
-        setRecorderStats((stats) => ({
-          frames: stats.frames + 1,
-          bytes: stats.bytes,
-          level,
-          peakLevel: Math.max(stats.peakLevel, peakLevel),
-        }));
-        return;
-      }
+      voiceBaselineRef.current = Math.max(voiceBaselineRef.current * 0.995, level);
 
       const downsampled = downsample(input, audioContext.sampleRate, targetSampleRate);
       const pcm = encodePCM16(downsampled);
       ws.send(pcm);
 
-      setRecorderStats((stats) => {
-        const next = {
-          frames: stats.frames + 1,
-          bytes: stats.bytes + pcm.byteLength,
-          level,
-          peakLevel: Math.max(stats.peakLevel, peakLevel),
-        };
-        if (debugEnabled && next.frames % 100 === 1) {
-          debugLog('audio frame sent', { frames: next.frames, bytes: next.bytes, level, peakLevel, baseline: voiceBaselineRef.current });
-        }
-        return next;
-      });
+      if (voiceFrameCountRef.current % realtimeUIUpdateEveryFrames === 0) {
+        const normalizedLevel = normalizeVoiceLevel(level, peakLevel);
+        setWaveLevels((levels) => [...levels.slice(1), normalizedLevel]);
+        setRecorderStats((stats) => {
+          const next = {
+            frames: voiceFrameCountRef.current,
+            bytes: stats.bytes + pcm.byteLength * realtimeUIUpdateEveryFrames,
+            level,
+            peakLevel: Math.max(stats.peakLevel, peakLevel),
+          };
+          if (debugEnabled && next.frames % 100 === 0) {
+            debugLog('audio frame sent', { frames: next.frames, bytes: next.bytes, level, peakLevel, baseline: voiceBaselineRef.current, samples: downsampled.length });
+          }
+          return next;
+        });
+      }
     };
 
     source.connect(processor);
@@ -888,13 +1079,6 @@ function App() {
     setRecordingState(nextState);
   }
 
-  function toggleCleanupOption(option: CleanupOptionKey) {
-    setEnabledCleanupOptions((current) => ({
-      ...current,
-      [option]: !current[option],
-    }));
-  }
-
   function clearSessionText() {
     setLiveText('');
     setInputText('');
@@ -928,80 +1112,177 @@ function App() {
   }
 
   if (showIntro) {
+    const activeIntro = introScenarios[introScene];
+
     return (
       <main className="intro-shell">
-        <div className="intro-hero">
+        <section className="intro-hero">
           <div className="intro-copy">
-            <span className="intro-kicker">VoxMem</span>
-            <h1>语音记忆输入台</h1>
-            <p>
-              轻量级语音输入工作区 —— 实时语音识别、智能文本整理、个人记忆纠错，让每一次口述都精准高效。
-            </p>
+            <span className="intro-kicker">
+              <span className={`intro-live-dot status-${healthState}`} />
+              VoxMem Voice Memory
+            </span>
+            <h1>把口述变成真正能提交的文字</h1>
+            <p>面向中文办公口述的输入台：自动处理改口，记住你的专属热词，并从多人声音里保留你的表达。</p>
+            <div className="intro-switcher" aria-label="功能演示">
+              {([
+                { key: 'polish' as IntroScene, label: '改口清理', icon: Sparkles },
+                { key: 'memory' as IntroScene, label: '热词记忆', icon: Brain },
+                { key: 'voice' as IntroScene, label: '声纹过滤', icon: Mic },
+              ]).map((item) => {
+                const Icon = item.icon;
+                return (
+                  <button
+                    key={item.key}
+                    type="button"
+                    className={introScene === item.key ? 'active' : ''}
+                    onClick={() => setIntroScene(item.key)}
+                  >
+                    <Icon size={18} aria-hidden="true" />
+                    <span>{item.label}</span>
+                  </button>
+                );
+              })}
+            </div>
             <div className="intro-actions">
               <button type="button" className="intro-primary" onClick={() => setShowIntro(false)}>
-                开始体验
+                进入语音工作台
                 <Send size={20} aria-hidden="true" />
               </button>
-              <span>无需登录，打开即用。支持 Chrome / Edge / Firefox。</span>
+              <span>{statusLabel}，无需账号，直接使用本机麦克风。</span>
             </div>
           </div>
 
-          <div className="intro-product">
-            <div className="intro-console">
-              <div className="intro-console-top">
-                <span className="intro-status-dot" />
-                <strong>实时 ASR</strong>
-                <em>&middot;</em>
-                <span>Paraformer 流式识别</span>
+          <div className="intro-product" aria-live="polite">
+            <section className="intro-demo-stage">
+              <div className="intro-demo-top">
+                <div>
+                  <span>{activeIntro.eyebrow}</span>
+                  <strong>
+                    {activeIntro.titleLines.map((line) => (
+                      <span key={line}>{line}</span>
+                    ))}
+                  </strong>
+                </div>
+                <em>{activeIntro.proof}</em>
               </div>
-              <div className="intro-waveform">
-                {Array.from({ length: 64 }, (_, i) => (
+
+              <div className="intro-waveform" aria-hidden="true">
+                {Array.from({ length: 56 }, (_, i) => (
                   <i
                     key={i}
                     style={{
-                      '--level': `${0.15 + Math.sin(i * 0.32) * 0.2 + Math.cos(i * 0.18) * 0.15 + Math.random() * 0.1}`,
-                      '--delay': `${i * 28}ms`,
+                      '--level': `${0.2 + Math.abs(Math.sin(i * 0.42)) * 0.64}`,
+                      '--delay': `${i * 24}ms`,
                     } as CSSProperties}
                   />
                 ))}
               </div>
-            </div>
 
-            <div className="intro-transform">
-              <section>
-                <span>原始转写</span>
-                <p>今天星期一，不对，今天是星期二，那个张力要同步熔断机制...</p>
-              </section>
-              <section>
-                <span>智能整理后</span>
-                <p>今天是星期二。张力需要同步熔断机制。</p>
-              </section>
-            </div>
+              <div className={`intro-effect-layer ${introScene}`}>
+                {introScene === 'polish' ? (
+                  <div className="intro-token-stream" aria-label="改口清理演示">
+                    <span>今天是</span>
+                    <span className="muted">星期一</span>
+                    <span className="muted">不对</span>
+                    <span className="keep">星期二</span>
+                    <span>下午三点</span>
+                    <span className="muted">那个</span>
+                    <span>同步需求</span>
+                  </div>
+                ) : null}
+                {introScene === 'memory' ? (
+                  <div className="intro-memory-demo" aria-label="热词记忆演示">
+                    <div className="memory-edit">
+                      <span>张立</span>
+                      <i>编辑为</i>
+                      <strong>张莉</strong>
+                    </div>
+                    <div className="memory-vault">
+                      <Brain size={18} aria-hidden="true" />
+                      <span>本地记忆已更新</span>
+                      <em>下次自动替换</em>
+                    </div>
+                  </div>
+                ) : null}
+                {introScene === 'voice' ? (
+                  <div className="intro-speaker-demo" aria-label="声纹过滤演示">
+                    <div className="speaker-lane primary">
+                      <span>我</span>
+                      <i />
+                      <strong>明天发版本，重点看热词命中。</strong>
+                    </div>
+                    <div className="speaker-lane muted">
+                      <span>周围人</span>
+                      <i />
+                      <strong>帮我拿杯咖啡。</strong>
+                    </div>
+                  </div>
+                ) : null}
+              </div>
 
-            <div className="intro-capabilities">
-              <article>
-                <Mic size={26} aria-hidden="true" />
-                <h2>实时语音识别</h2>
-                <p>浏览器端麦克风采集，WebSocket 流式传输，Paraformer 实时转写。</p>
+              <div className="intro-pipeline">
+                <article className="intro-transcript-card">
+                  <span>实时听到</span>
+                  <p>{activeIntro.raw}</p>
+                </article>
+                <div className="intro-process-rail" aria-hidden="true">
+                  <span />
+                  <Check size={18} />
+                  <span />
+                </div>
+                <article className="intro-transcript-card final">
+                  <span>VoxMem 输出</span>
+                  <p>{activeIntro.output}</p>
+                </article>
+              </div>
+
+              <p className="intro-demo-desc">{activeIntro.description}</p>
+            </section>
+
+            <section className="intro-proof-grid">
+              <article className={introScene === 'polish' ? 'active' : ''}>
+                <Sparkles size={22} aria-hidden="true" />
+                <div>
+                  <strong>改口识别</strong>
+                  <p>“不对、应该是、刚才说错了”会被压缩成最终结论。</p>
+                </div>
               </article>
-              <article>
-                <Sparkles size={26} aria-hidden="true" />
-                <h2>LLM 智能整理</h2>
-                <p>口语修正、填充词去除、段落优化、Markdown 格式化。</p>
+              <article className={introScene === 'memory' ? 'active' : ''}>
+                <Database size={22} aria-hidden="true" />
+                <div>
+                  <strong>本地记忆</strong>
+                  <p>人名、项目名、行业词编辑后进入个人替换规则。</p>
+                </div>
               </article>
-              <article>
-                <Brain size={26} aria-hidden="true" />
-                <h2>个人记忆纠错</h2>
-                <p>自动学习你的专属词汇替换，越用越准。</p>
+              <article className={introScene === 'voice' ? 'active' : ''}>
+                <Mic size={22} aria-hidden="true" />
+                <div>
+                  <strong>说话人过滤</strong>
+                  <p>多人语音先切分，再只保留目标说话人的内容。</p>
+                </div>
               </article>
-              <article>
-                <Zap size={26} aria-hidden="true" />
-                <h2>开箱即用</h2>
-                <p>无需注册、无需登录，打开浏览器即可开始语音输入。</p>
-              </article>
-            </div>
+            </section>
           </div>
-        </div>
+        </section>
+
+        <section className="intro-scenario-strip" aria-label="真实场景">
+          <article>
+            <span>01</span>
+            <strong>会议纪要</strong>
+            <p>边说边修正，最终只留下确认后的事项。</p>
+          </article>
+          <article>
+            <span>02</span>
+            <strong>专属词库</strong>
+            <p>常用同事名、客户名、项目代号越用越准。</p>
+          </article>
+          <article>
+            <span>03</span>
+            <strong>嘈杂环境</strong>
+            <p>旁边人的插话不会轻易混入你的正文。</p>
+          </article>
+        </section>
       </main>
     );
   }
@@ -1018,7 +1299,7 @@ function App() {
             <span className="status-dot" aria-hidden="true" />
             {statusLabel}
           </span>
-          <button type="button" className="ghost-button" onClick={() => void checkHealth()} title={text.retryAPI}>
+          <button type="button" className="ghost-button" onClick={openMetricsDashboard}>
             <Server size={18} aria-hidden="true" />
             <span>{'\u6307\u6807\u770b\u677f'}</span>
           </button>
@@ -1053,7 +1334,7 @@ function App() {
               onChange={(event) => setVoiceFilterMode(event.target.checked)}
               disabled={isRecordingActive}
             />
-            <span>{'\u79bb\u7ebf\u4eba\u58f0\u5206\u79bb'}</span>
+            <span>{text.voiceFilter}</span>
           </label>
         </div>
 
@@ -1133,36 +1414,15 @@ function App() {
             ) : null}
 
             {voiceFilterLoading ? (
-              <div className="source-text">
-                <span>Voice Filter</span>
-                <p>Processing audio with speaker diarization...</p>
+              <div className="source-text speaker-filter">
+                <span>{text.voiceFilter}</span>
+                <p>{text.voiceFilterWorking}</p>
               </div>
             ) : null}
 
-            {voiceFilterResult && voiceFilterResult.speaker_count > 1 ? (
+            {voiceFilterResult && voiceFilterResult.speaker_count > 1 && selectedSpeaker !== 'all' ? (
               <div className="source-text speaker-filter">
-                <span>{voiceFilterResult.speaker_count} speakers detected - select speaker to keep:</span>
-                {Array.from(new Set(voiceFilterResult.sentences.map((sentence) => sentence.speaker_id))).map((sid) => (
-                  <label key={sid}>
-                    <input
-                      type="radio"
-                      name="vfspeaker"
-                      value={sid}
-                      checked={selectedSpeaker === String(sid)}
-                      onChange={() => {
-                        setSelectedSpeaker(String(sid));
-                        const filtered = voiceFilterResult.sentences
-                          .filter((sentence) => sentence.speaker_id === sid)
-                          .map((sentence) => sentence.text)
-                          .join('');
-                        setRawFinalText(filtered);
-                        setInputText(filtered);
-                        setLiveText(filtered);
-                      }}
-                    />
-                    {' Speaker ' + sid}
-                  </label>
-                ))}
+                <span>{text.voiceFilterApplied}</span>
                 <button type="button" onClick={() => {
                   setSelectedSpeaker('all');
                   const all = voiceFilterResult.sentences.map((sentence) => sentence.text).join('');
@@ -1170,7 +1430,7 @@ function App() {
                   setInputText(all);
                   setLiveText(all);
                 }}>
-                  Show all
+                  {'\u663e\u793a\u5168\u90e8'}
                 </button>
               </div>
             ) : null}
@@ -1230,21 +1490,41 @@ function App() {
               </div>
             ) : null}
 
-            <section className="cleanup-card">
+            <section className="voice-processing-card">
               <div className="pane-heading">
-                <h2><Sparkles size={18} aria-hidden="true" />{'\u667a\u80fd\u6574\u7406'}</h2>
+                <h2><Mic size={18} aria-hidden="true" />{text.voiceProcessing}</h2>
               </div>
               <div className="toggle-stack">
-                {cleanupOptions.map((option) => (
+                <label className={voiceFilterMode ? 'active voice-option' : 'voice-option'}>
+                  <span>{text.voiceFilter}</span>
+                  <input
+                    type="checkbox"
+                    checked={voiceFilterMode}
+                    onChange={(event) => setVoiceFilterMode(event.target.checked)}
+                    disabled={isRecordingActive}
+                  />
+                </label>
+              </div>
+            </section>
+
+            <section className="mode-card">
+              <div className="pane-heading">
+                <h2><Sparkles size={18} aria-hidden="true" />{'\u8f93\u51fa\u6a21\u5f0f'}</h2>
+              </div>
+              <div className="mode-stack">
+                {([
+                  { key: 'raw' as OutputMode, label: '\u539f\u58f0', desc: '\u4ec5\u672c\u5730\u8bb0\u5fc6\u66ff\u6362\uff0c\u4e0d\u8c03\u7528 AI' },
+                  { key: 'polish' as OutputMode, label: '\u8f7b\u6574\u7406', desc: 'AI \u4fee\u6b63\u6539\u53e3\u3001\u53bb\u53e3\u5934\u7985' },
+                  { key: 'markdown' as OutputMode, label: 'Markdown', desc: '\u8f7b\u6574\u7406 + \u5217\u8868\u683c\u5f0f\u5316' },
+                ]).map((opt) => (
                   <button
-                    key={option.key}
-                    className={enabledCleanupOptions[option.key] ? 'active' : ''}
+                    key={opt.key}
+                    className={mode === opt.key ? 'active' : ''}
                     type="button"
-                    aria-pressed={enabledCleanupOptions[option.key]}
-                    onClick={() => toggleCleanupOption(option.key)}
+                    onClick={() => setMode(opt.key)}
                   >
-                    <span>{option.label}</span>
-                    <Check size={15} aria-hidden="true" />
+                    <span className="mode-label">{opt.label}</span>
+                    <span className="mode-desc">{opt.desc}</span>
                   </button>
                 ))}
               </div>
@@ -1252,6 +1532,94 @@ function App() {
           </aside>
         </div>
       </section>
+
+      {metricsOpen ? (
+        <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="输入质量观察">
+          <div className="memory-modal metrics-modal">
+            <div className="pane-heading metrics-heading">
+              <div>
+                <h2>{'\u8f93\u5165\u8d28\u91cf\u89c2\u5bdf'}</h2>
+                <p>{'\u770b\u8fd9\u5957\u8bed\u97f3\u8f93\u5165\u662f\u5426\u8d8a\u7528\u8d8a\u51c6\u3001\u8d8a\u7528\u8d8a\u7701\u4e8b\u3002'}</p>
+              </div>
+              <div className="metrics-actions">
+                <button type="button" aria-label="刷新指标" title="刷新指标" onClick={() => void loadMetrics()} disabled={metricsLoading}>
+                  <RefreshCw size={16} aria-hidden="true" />
+                </button>
+                <button type="button" aria-label={text.close} title={text.close} onClick={() => setMetricsOpen(false)}>
+                  <X size={16} aria-hidden="true" />
+                </button>
+              </div>
+            </div>
+
+            <div className="metrics-grid">
+              <article>
+                <span>{'\u5e73\u5747\u4fee\u6539\u7387'}</span>
+                <strong>{formatPercent(metricsSummary?.average_edit_rate ?? 0)}</strong>
+                <em>{'\u6700\u8fd1 10 \u6b21\u4fee\u6539'}</em>
+              </article>
+              <article>
+                <span>{'\u8bb0\u5fc6\u547d\u4e2d'}</span>
+                <strong>{formatNumber(metricsSummary?.hotword_hit_count ?? 0)}</strong>
+                <em>{'\u672c\u5730\u70ed\u8bcd\u5df2\u81ea\u52a8\u66ff\u6362'}</em>
+              </article>
+              <article>
+                <span>{'\u70ed\u8bcd\u603b\u6570'}</span>
+                <strong>{formatNumber(metricsSummary?.hotword_count ?? hotwords.length)}</strong>
+                <em>{`${formatNumber(metricsSummary?.hotword_learned_count ?? 0)} \u6b21\u5b66\u4e60`}</em>
+              </article>
+              <article>
+                <span>{'\u672c\u6b21\u6574\u7406'}</span>
+                <strong>{formatLatency(processingLatencyMS)}</strong>
+                <em>{processingSource ? `${text.processedBy}: ${processingSource}` : '\u7b49\u5f85\u672c\u6b21\u8f93\u5165'}</em>
+              </article>
+            </div>
+
+            <div className="metrics-status-grid">
+              <section>
+                <h3>{'\u672c\u6b21\u8f93\u5165'}</h3>
+                <dl>
+                  <div><dt>{'\u4fee\u6539\u7387'}</dt><dd>{formatPercent(currentEditRate)}</dd></div>
+                  <div><dt>{'\u539f\u59cb\u5b57\u6570'}</dt><dd>{formatNumber([...originalTranscript].length)}</dd></div>
+                  <div><dt>{'\u8f93\u51fa\u5b57\u6570'}</dt><dd>{formatNumber([...resultText].length)}</dd></div>
+                  <div><dt>{'\u97f3\u9891\u5e27'}</dt><dd>{formatNumber(recorderStats.frames)}</dd></div>
+                </dl>
+              </section>
+              <section>
+                <h3>{'\u94fe\u8def\u5065\u5eb7'}</h3>
+                <dl>
+                  <div><dt>API</dt><dd>{statusLabel}</dd></div>
+                  <div><dt>ASR</dt><dd>{recordingStateLabel(recordingState)}</dd></div>
+                  <div><dt>LLM</dt><dd>{processingState === 'processing' ? text.autoProcessing : processingState === 'failed' ? '\u5931\u8d25' : '\u53ef\u7528'}</dd></div>
+                  <div><dt>{'\u9ea6\u514b\u98ce'}</dt><dd>{micLooksSilent ? '\u672a\u68c0\u6d4b\u5230\u58f0\u97f3' : micDiagnostics?.label || text.defaultMicrophone}</dd></div>
+                </dl>
+              </section>
+            </div>
+
+            <section className="recent-metrics">
+              <div className="recent-metrics-title">
+                <h3>{'\u6700\u8fd1\u4fee\u6539'}</h3>
+                <span>{metricsLoading ? '\u5237\u65b0\u4e2d' : `${metricsSummary?.correction_count ?? 0} \u6b21\u7d2f\u8ba1\u4fee\u6539`}</span>
+              </div>
+              {metricsSummary?.recent_corrections?.length ? (
+                <div className="recent-metrics-list">
+                  {metricsSummary.recent_corrections.map((item) => (
+                    <article key={item.id}>
+                      <div>
+                        <strong>{formatPercent(item.edit_rate)}</strong>
+                        <span>{formatMetricTime(item.created_at)}</span>
+                      </div>
+                      <p>{item.corrected_text}</p>
+                      <em>{`${item.edit_distance} \u5904\u4fee\u6539`}</em>
+                    </article>
+                  ))}
+                </div>
+              ) : (
+                <p className="placeholder">{'\u6682\u65e0\u4fee\u6539\u8bb0\u5f55\uff0c\u5f55\u97f3\u540e\u7f16\u8f91\u5e76\u786e\u8ba4\u4e00\u6b21\u5c31\u4f1a\u51fa\u73b0\u6570\u636e\u3002'}</p>
+              )}
+            </section>
+          </div>
+        </div>
+      ) : null}
 
       {memoryDialogOpen && learnedMappings.length > 0 ? (
         <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label={text.memoryLearned}>
@@ -1394,12 +1762,13 @@ function normalizeVoiceLevel(rms: number, peak: number) {
 }
 
 function createSilentWave() {
-  return Array.from({ length: waveBarCount }, () => 0);
+  return Array.from({ length: 44 }, () => 0);
 }
 
 function createPreviewWave() {
-  return Array.from({ length: waveBarCount }, (_, index) => {
-    const centerDistance = Math.abs(index - (waveBarCount - 1) / 2) / (waveBarCount / 2);
+  const barCount = 44;
+  return Array.from({ length: barCount }, (_, index) => {
+    const centerDistance = Math.abs(index - (barCount - 1) / 2) / (barCount / 2);
     const envelope = Math.max(0.02, 1 - Math.pow(centerDistance, 1.85));
     const pulse = Math.abs(Math.sin(index * 0.9)) * 0.5 + Math.abs(Math.cos(index * 0.41)) * 0.2;
     const centerBoost = Math.exp(-centerDistance * centerDistance * 10) * 0.34;
@@ -1459,6 +1828,64 @@ function toWebSocketBase(httpBase: string) {
 
 function createCommitKey(mode: OutputMode, originalText: string, enhancedText: string, inputText: string) {
   return [mode, originalText.trim(), enhancedText.trim(), inputText.trim()].join('\u0000');
+}
+
+function calculateTextEditRate(original: string, corrected: string) {
+  const a = [...original];
+  const b = [...corrected];
+  const maxLength = Math.max(a.length, b.length);
+  if (maxLength === 0) {
+    return 0;
+  }
+  return levenshteinDistance(a, b) / maxLength;
+}
+
+function levenshteinDistance(a: string[], b: string[]) {
+  if (a.length === 0) return b.length;
+  if (b.length === 0) return a.length;
+
+  let previous = Array.from({ length: b.length + 1 }, (_, index) => index);
+  let current = new Array<number>(b.length + 1);
+  for (let i = 1; i <= a.length; i += 1) {
+    current[0] = i;
+    for (let j = 1; j <= b.length; j += 1) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      current[j] = Math.min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + cost);
+    }
+    [previous, current] = [current, previous];
+  }
+  return previous[b.length];
+}
+
+function formatPercent(value: number) {
+  return `${Math.round(Math.max(0, value) * 100)}%`;
+}
+
+function formatNumber(value: number) {
+  return new Intl.NumberFormat('zh-CN').format(value);
+}
+
+function formatLatency(value: number | null) {
+  if (value === null) {
+    return '--';
+  }
+  if (value >= 1000) {
+    return `${(value / 1000).toFixed(1)}s`;
+  }
+  return `${value}ms`;
+}
+
+function formatMetricTime(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return new Intl.DateTimeFormat('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(date);
 }
 
 function getUserID() {
