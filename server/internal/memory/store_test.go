@@ -132,6 +132,41 @@ func TestDeleteMapping(t *testing.T) {
 	}
 }
 
+func TestQualitySummary(t *testing.T) {
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	if _, err := store.SaveCorrection(ctx, Correction{
+		UserID:        "user-1",
+		SessionID:     "session-1",
+		OriginalText:  "今天找张力确认方案",
+		CorrectedText: "今天找张立确认方案",
+	}); err != nil {
+		t.Fatalf("save correction: %v", err)
+	}
+	if _, _, err := store.ApplyMappings(ctx, "user-1", "今天找张力确认方案"); err != nil {
+		t.Fatalf("apply mappings: %v", err)
+	}
+
+	summary, err := store.QualitySummary(ctx, "user-1")
+	if err != nil {
+		t.Fatalf("quality summary: %v", err)
+	}
+	if summary.CorrectionCount != 1 || summary.HotwordCount != 1 || summary.HotwordHitCount != 1 {
+		t.Fatalf("unexpected summary counts: %+v", summary)
+	}
+	if len(summary.RecentCorrections) != 1 || summary.RecentCorrections[0].EditDistance == 0 {
+		t.Fatalf("expected recent correction with edit distance, got %+v", summary.RecentCorrections)
+	}
+	if summary.AverageEditRate <= 0 {
+		t.Fatalf("expected positive average edit rate, got %+v", summary)
+	}
+}
+
 func TestStoreSaveCorrectionReplacesConflictingMapping(t *testing.T) {
 	store, err := Open(":memory:")
 	if err != nil {

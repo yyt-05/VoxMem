@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -192,7 +193,7 @@ func TestMockASRWebSocketFlow(t *testing.T) {
 	}
 }
 
-func TestMockASRPolishReturnsEditableInputWithoutLLM(t *testing.T) {
+func TestMockASRPolishUsesLocalFallbackWithoutLLM(t *testing.T) {
 	store := testStore(t)
 	defer store.Close()
 
@@ -228,16 +229,24 @@ func TestMockASRPolishReturnsEditableInputWithoutLLM(t *testing.T) {
 	if err := conn.ReadJSON(&final); err != nil {
 		t.Fatalf("read final transcript: %v", err)
 	}
-	var inputReady clientEvent
-	if err := conn.ReadJSON(&inputReady); err != nil {
-		t.Fatalf("read input ready event: %v", err)
+	var processed clientEvent
+	for i := 0; i < 5; i++ {
+		if err := conn.ReadJSON(&processed); err != nil {
+			t.Fatalf("read processed event: %v", err)
+		}
+		if processed.Type == "processed" {
+			break
+		}
 	}
-	if inputReady.Type != "input_ready" || inputReady.Text == "" {
-		t.Fatalf("unexpected input ready event: %+v", inputReady)
+	if processed.Type != "processed" {
+		t.Fatalf("unexpected processed event: %+v", processed)
+	}
+	if processed.Text != "今天是星期二" || processed.Source != "local_fallback" || processed.Status != "completed" {
+		t.Fatalf("unexpected processed payload: %+v", processed)
 	}
 }
 
-func TestInputCommitHandlerProcessesRawAndSavesCorrection(t *testing.T) {
+func TestInputCommitHandlerLearnsWithExplicitFlag(t *testing.T) {
 	store := testStore(t)
 	defer store.Close()
 
@@ -247,7 +256,8 @@ func TestInputCommitHandlerProcessesRawAndSavesCorrection(t *testing.T) {
 		"mode": "raw",
 		"original_text": "今天找张力确认方案",
 		"enhanced_text": "今天找张力确认方案",
-		"final_text": "今天找张立确认方案"
+		"final_text": "今天找张立确认方案",
+		"learn_hotwords": true
 	}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/input/commit", body)
 	rec := httptest.NewRecorder()
@@ -280,7 +290,8 @@ func TestInputCommitHandlerDoesNotDuplicateSameCorrection(t *testing.T) {
 		"mode": "raw",
 		"original_text": "今天找张力确认方案",
 		"enhanced_text": "今天找张力确认方案",
-		"final_text": "今天找张立确认方案"
+		"final_text": "今天找张立确认方案",
+		"manual_edit_base": "今天找张力确认方案"
 	}`
 
 	for i := 0; i < 2; i++ {
@@ -298,6 +309,167 @@ func TestInputCommitHandlerDoesNotDuplicateSameCorrection(t *testing.T) {
 	}
 	if len(mappings) != 1 || mappings[0].CorrectionCount != 1 {
 		t.Fatalf("expected one mapping with one correction, got %+v", mappings)
+	}
+}
+
+func TestInputCommitHandlerLearnsByDefault(t *testing.T) {
+	store := testStore(t)
+	defer store.Close()
+
+	body := strings.NewReader(`{
+		"user_id": "user-1",
+		"session_id": "session-1",
+		"mode": "raw",
+		"original_text": "今天找张力确认方案",
+		"enhanced_text": "今天找张力确认方案",
+		"final_text": "今天找张立确认方案"
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/input/commit", body)
+	rec := httptest.NewRecorder()
+
+	inputCommitHandler(config{}, store, testLogger()).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected input commit status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+
+	var payload inputCommitResponse
+	if err := json.NewDecoder(rec.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode input commit response: %v", err)
+	}
+	if len(payload.Mappings) != 1 {
+		t.Fatalf("expected default learning to return one mapping, got %+v", payload.Mappings)
+	}
+
+	mappings, err := store.ListMappings(context.Background(), "user-1")
+	if err != nil {
+		t.Fatalf("list mappings: %v", err)
+	}
+	if len(mappings) != 1 {
+		t.Fatalf("expected default learning to persist one mapping, got %+v", mappings)
+	}
+}
+
+func TestInputCommitHandlerDoesNotLearnWhenFlagFalse(t *testing.T) {
+	store := testStore(t)
+	defer store.Close()
+
+	body := strings.NewReader(`{
+		"user_id": "user-1",
+		"session_id": "session-1",
+		"mode": "raw",
+		"original_text": "\u4eca\u5929\u627e\u5f20\u529b\u786e\u8ba4\u65b9\u6848",
+		"enhanced_text": "\u4eca\u5929\u627e\u5f20\u529b\u786e\u8ba4\u65b9\u6848",
+		"final_text": "\u4eca\u5929\u627e\u5f20\u7acb\u786e\u8ba4\u65b9\u6848",
+		"manual_edit_base": "\u4eca\u5929\u627e\u5f20\u529b\u786e\u8ba4\u65b9\u6848",
+		"learn_hotwords": false
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/input/commit", body)
+	rec := httptest.NewRecorder()
+
+	inputCommitHandler(config{}, store, testLogger()).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected input commit status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+
+	var payload inputCommitResponse
+	if err := json.NewDecoder(rec.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode input commit response: %v", err)
+	}
+	if len(payload.Mappings) != 0 {
+		t.Fatalf("expected no learned mappings, got %+v", payload.Mappings)
+	}
+
+	mappings, err := store.ListMappings(context.Background(), "user-1")
+	if err != nil {
+		t.Fatalf("list mappings: %v", err)
+	}
+	if len(mappings) != 0 {
+		t.Fatalf("expected no persisted mappings, got %+v", mappings)
+	}
+}
+
+func TestInputCommitHandlerAppliesHotwordsWithoutLearning(t *testing.T) {
+	store := testStore(t)
+	defer store.Close()
+
+	if _, err := store.SaveCorrection(context.Background(), memory.Correction{
+		UserID:        "user-1",
+		SessionID:     "session-1",
+		OriginalText:  "今天找张力确认方案",
+		CorrectedText: "今天找张立确认方案",
+	}); err != nil {
+		t.Fatalf("seed correction: %v", err)
+	}
+
+	body := strings.NewReader(`{
+		"user_id": "user-1",
+		"session_id": "session-2",
+		"mode": "raw",
+		"original_text": "明天找张力复盘",
+		"enhanced_text": "明天找张力复盘",
+		"final_text": "明天找张力复盘",
+		"learn_hotwords": false,
+		"apply_hotwords": true
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/input/commit", body)
+	rec := httptest.NewRecorder()
+
+	inputCommitHandler(config{}, store, testLogger()).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected input commit status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+
+	var payload inputCommitResponse
+	if err := json.NewDecoder(rec.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode input commit response: %v", err)
+	}
+	if payload.Text != "明天找张立复盘" {
+		t.Fatalf("expected hotword-applied response, got %+v", payload)
+	}
+	if len(payload.Mappings) != 1 || payload.Mappings[0].FromText != "张力" || payload.Mappings[0].ToText != "张立" {
+		t.Fatalf("expected hotword hit mapping, got %+v", payload.Mappings)
+	}
+
+	mappings, err := store.ListMappings(context.Background(), "user-1")
+	if err != nil {
+		t.Fatalf("list mappings: %v", err)
+	}
+	if len(mappings) != 1 || mappings[0].CorrectionCount != 1 {
+		t.Fatalf("expected no new learned correction, got %+v", mappings)
+	}
+}
+
+func TestInputCommitHandlerLearnsFromManualEditBase(t *testing.T) {
+	store := testStore(t)
+	defer store.Close()
+
+	body := strings.NewReader(`{
+		"user_id": "user-1",
+		"session_id": "session-1",
+		"mode": "raw",
+		"original_text": "今天那个找张力确认一下方案",
+		"enhanced_text": "今天找张力确认方案",
+		"final_text": "今天找张立确认方案",
+		"manual_edit_base": "今天找张力确认方案"
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/input/commit", body)
+	rec := httptest.NewRecorder()
+
+	inputCommitHandler(config{}, store, testLogger()).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected input commit status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+
+	var payload inputCommitResponse
+	if err := json.NewDecoder(rec.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode input commit response: %v", err)
+	}
+	if len(payload.Mappings) != 1 || payload.Mappings[0].FromText != "张力" || payload.Mappings[0].ToText != "张立" {
+		t.Fatalf("expected mapping from manual edit base, got %+v", payload.Mappings)
 	}
 }
 
@@ -332,6 +504,32 @@ func TestCorrectionAndHotwordsHandlers(t *testing.T) {
 	}
 }
 
+func TestMetricsSummaryHandler(t *testing.T) {
+	store := testStore(t)
+	defer store.Close()
+
+	_, err := store.SaveCorrection(context.Background(), memory.Correction{
+		UserID:        "user-1",
+		SessionID:     "session-1",
+		OriginalText:  "今天找张力确认方案",
+		CorrectedText: "今天找张立确认方案",
+	})
+	if err != nil {
+		t.Fatalf("save correction: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/metrics/summary?user_id=user-1", nil)
+	rec := httptest.NewRecorder()
+	metricsSummaryHandler(store, testLogger()).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected metrics summary status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"correction_count":1`) {
+		t.Fatalf("expected correction count in metrics response, got %s", rec.Body.String())
+	}
+}
+
 func TestKodoDomainAddsSchemeAndTrimsSlash(t *testing.T) {
 	if got := kodoDomain("cdn.example.com/", true); got != "https://cdn.example.com" {
 		t.Fatalf("unexpected https domain: %q", got)
@@ -352,6 +550,48 @@ func TestUploadToKodoRequiresConfig(t *testing.T) {
 	_, err := uploadToKodo(config{}, context.Background(), []byte{1, 2, 3})
 	if err == nil || !strings.Contains(err.Error(), "VOXMEM_KODO_ACCESS_KEY") {
 		t.Fatalf("expected missing Kodo access key error, got %v", err)
+	}
+}
+
+func TestFileTranscribeHandlerRequiresAPIKey(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/api/transcribe/file", bytes.NewReader([]byte{1, 2, 3}))
+	rec := httptest.NewRecorder()
+
+	fileTranscribeHandler(config{}, testLogger()).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "DASHSCOPE_API_KEY") {
+		t.Fatalf("expected API key error, got %s", rec.Body.String())
+	}
+}
+
+func TestFileTranscribeHandlerRejectsEmptyAudio(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/api/transcribe/file", bytes.NewReader(nil))
+	rec := httptest.NewRecorder()
+
+	fileTranscribeHandler(config{asrAPIKey: "test-key"}, testLogger()).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusBadRequest, rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "empty audio data") {
+		t.Fatalf("expected empty audio error, got %s", rec.Body.String())
+	}
+}
+
+func TestFileTranscribeHandlerReportsUploadConfigError(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/api/transcribe/file", bytes.NewReader([]byte{1, 2, 3}))
+	rec := httptest.NewRecorder()
+
+	fileTranscribeHandler(config{asrAPIKey: "test-key"}, testLogger()).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusInternalServerError, rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "VOXMEM_KODO_ACCESS_KEY") {
+		t.Fatalf("expected missing Kodo config error, got %s", rec.Body.String())
 	}
 }
 

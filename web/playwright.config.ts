@@ -7,7 +7,7 @@ export default defineConfig({
     timeout: 10_000,
   },
   use: {
-    baseURL: 'http://127.0.0.1:5175',
+    baseURL: 'http://127.0.0.1:5185',
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
     launchOptions: {
@@ -17,15 +17,15 @@ export default defineConfig({
   webServer: [
     {
       command:
-        'powershell -NoProfile -Command "$env:VOXMEM_SERVER_ADDR=\':18080\'; $env:VOXMEM_ASR_MODE=\'mock\'; $env:VOXMEM_ALLOWED_ORIGINS=\'http://127.0.0.1:5175\'; $env:VOXMEM_AUDIO_DEBUG_ENABLED=\'true\'; $env:VOXMEM_AUDIO_DEBUG_DIR=\'..\\tmp\\e2e-audio-debug\'; $env:VOXMEM_DB_PATH=\'..\\tmp\\e2e-voxmem.db\'; Set-Location ..\\server; go run .\\cmd\\server"',
-      url: 'http://127.0.0.1:18080/healthz',
+        'node -e "const path=require(\'path\'); process.env.VOXMEM_SERVER_ADDR=\':18085\'; process.env.VOXMEM_ASR_MODE=\'mock\'; process.env.VOXMEM_ALLOWED_ORIGINS=\'http://127.0.0.1:5185\'; process.env.VOXMEM_AUDIO_DEBUG_ENABLED=\'true\'; process.env.VOXMEM_AUDIO_DEBUG_DIR=\'../tmp/e2e-audio-debug\'; process.env.VOXMEM_DB_PATH=\'../tmp/e2e-voxmem.db\'; process.env.GOCACHE=path.resolve(\'../server/.gocache\'); const cmd = process.platform === \'win32\' ? \'go run .\\\\cmd\\\\server\' : \'go run ./cmd/server\'; require(\'child_process\').spawn(cmd, { cwd: \'../server\', shell: true, stdio: \'inherit\', env: process.env });"',
+      url: 'http://127.0.0.1:18085/healthz',
       reuseExistingServer: false,
       timeout: 30_000,
     },
     {
       command:
-        'powershell -NoProfile -Command "$env:VITE_API_BASE_URL=\'http://127.0.0.1:18080\'; npm run dev -- --host 127.0.0.1 --port 5175"',
-      url: 'http://127.0.0.1:5175',
+        'node -e "process.env.VITE_API_BASE_URL=\'http://127.0.0.1:18085\'; require(\'child_process\').spawn(\'npm run dev -- --host 127.0.0.1 --port 5185\', { shell: true, stdio: \'inherit\', env: process.env });"',
+      url: 'http://127.0.0.1:5185',
       reuseExistingServer: false,
       timeout: 30_000,
     },

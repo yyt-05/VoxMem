@@ -37,6 +37,26 @@ type Mapping struct {
 	UpdatedAt       string `json:"updated_at,omitempty"`
 }
 
+type QualitySummary struct {
+	CorrectionCount     int                      `json:"correction_count"`
+	AverageEditRate     float64                  `json:"average_edit_rate"`
+	HotwordCount        int                      `json:"hotword_count"`
+	HotwordHitCount     int                      `json:"hotword_hit_count"`
+	HotwordLearnedCount int                      `json:"hotword_learned_count"`
+	RecentCorrections   []RecentCorrectionMetric `json:"recent_corrections"`
+}
+
+type RecentCorrectionMetric struct {
+	ID            int64   `json:"id"`
+	SessionID     string  `json:"session_id,omitempty"`
+	OriginalText  string  `json:"original_text"`
+	EnhancedText  string  `json:"enhanced_text,omitempty"`
+	CorrectedText string  `json:"corrected_text"`
+	EditDistance  int     `json:"edit_distance"`
+	EditRate      float64 `json:"edit_rate"`
+	CreatedAt     string  `json:"created_at"`
+}
+
 func Open(path string) (*Store, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, errors.New("database path is required")
@@ -323,6 +343,66 @@ func (s *Store) DeleteMapping(ctx context.Context, userID string, id int64) erro
 	return nil
 }
 
+func (s *Store) QualitySummary(ctx context.Context, userID string) (QualitySummary, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return QualitySummary{}, errors.New("user_id is required")
+	}
+
+	summary := QualitySummary{}
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM corrections
+		WHERE user_id = ?
+	`, userID).Scan(&summary.CorrectionCount); err != nil {
+		return QualitySummary{}, fmt.Errorf("count corrections: %w", err)
+	}
+
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*), COALESCE(SUM(hit_count), 0), COALESCE(SUM(correction_count), 0)
+		FROM hotword_mappings
+		WHERE user_id = ?
+	`, userID).Scan(&summary.HotwordCount, &summary.HotwordHitCount, &summary.HotwordLearnedCount); err != nil {
+		return QualitySummary{}, fmt.Errorf("count hotword metrics: %w", err)
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, COALESCE(session_id, ''), original_text, COALESCE(enhanced_text, ''), corrected_text, created_at
+		FROM corrections
+		WHERE user_id = ?
+		ORDER BY created_at DESC, id DESC
+		LIMIT 10
+	`, userID)
+	if err != nil {
+		return QualitySummary{}, fmt.Errorf("list recent corrections: %w", err)
+	}
+	defer rows.Close()
+
+	totalRate := 0.0
+	for rows.Next() {
+		var item RecentCorrectionMetric
+		if err := rows.Scan(&item.ID, &item.SessionID, &item.OriginalText, &item.EnhancedText, &item.CorrectedText, &item.CreatedAt); err != nil {
+			return QualitySummary{}, fmt.Errorf("scan recent correction: %w", err)
+		}
+		baseText := item.EnhancedText
+		if baseText == "" {
+			baseText = item.OriginalText
+		}
+		item.EditDistance = levenshteinDistance([]rune(baseText), []rune(item.CorrectedText))
+		item.EditRate = editRate(baseText, item.CorrectedText, item.EditDistance)
+		totalRate += item.EditRate
+		summary.RecentCorrections = append(summary.RecentCorrections, item)
+	}
+	if err := rows.Err(); err != nil {
+		return QualitySummary{}, fmt.Errorf("iterate recent corrections: %w", err)
+	}
+	if len(summary.RecentCorrections) > 0 {
+		summary.AverageEditRate = totalRate / float64(len(summary.RecentCorrections))
+	}
+
+	return summary, nil
+}
+
 func (s *Store) SavePreference(ctx context.Context, userID string, key string, value string) error {
 	userID = strings.TrimSpace(userID)
 	key = strings.TrimSpace(key)
@@ -523,6 +603,19 @@ func changeRatioTooHigh(original string, corrected string) bool {
 	}
 	dist := levenshteinDistance(origRunes, corrRunes)
 	return float64(dist)/float64(maxLen) > 0.5
+}
+
+func editRate(original string, corrected string, distance int) float64 {
+	origRunes := []rune(original)
+	corrRunes := []rune(corrected)
+	maxLen := len(origRunes)
+	if len(corrRunes) > maxLen {
+		maxLen = len(corrRunes)
+	}
+	if maxLen == 0 {
+		return 0
+	}
+	return float64(distance) / float64(maxLen)
 }
 
 func levenshteinDistance(a, b []rune) int {
