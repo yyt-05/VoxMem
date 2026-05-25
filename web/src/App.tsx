@@ -212,6 +212,13 @@ const targetSampleRate = 16000;
 const realtimeProcessorBufferSize = 1024;
 const voiceFilterProcessorBufferSize = 4096;
 const realtimeUIUpdateEveryFrames = 4;
+const voiceFilterSpeechRMS = 0.006;
+const voiceFilterSpeechPeak = 0.025;
+const voiceFilterSilenceMS = 700;
+const voiceFilterMinUtteranceMS = 500;
+const voiceFilterPreferredUtteranceMS = 1000;
+const voiceFilterMaxUtteranceMS = 10000;
+const voiceFilterPreRollMS = 280;
 const debugEnabled = import.meta.env.DEV;
 const voiceGuideStorageKey = 'voxmem.voice-filter-guide.dismissed';
 
@@ -351,6 +358,18 @@ function App() {
   const voiceFilterSampleRateRef = useRef(targetSampleRate);
   const filteredFrameCountRef = useRef(0);
   const voiceFilterAppliedTextRef = useRef('');
+  const voiceFilterPreRollRef = useRef<Float32Array[]>([]);
+  const voiceFilterUtteranceRef = useRef<Float32Array[]>([]);
+  const voiceFilterUtteranceSamplesRef = useRef(0);
+  const voiceFilterPreRollSamplesRef = useRef(0);
+  const voiceFilterSilenceMSRef = useRef(0);
+  const voiceFilterSpeechActiveRef = useRef(false);
+  const voiceFilterSegmentSeqRef = useRef(0);
+  const voiceFilterInFlightRef = useRef(0);
+  const voiceFilterStopRequestedRef = useRef(false);
+  const voiceFilterTextPartsRef = useRef<string[]>([]);
+  const voiceFilterSentencesRef = useRef<FileTranscribeSentence[]>([]);
+  const voiceFilterSpeakerCountRef = useRef(0);
 
   const statusLabel = useMemo(() => {
     if (healthState === 'ok') return text.apiConnected;
@@ -847,11 +866,6 @@ function App() {
       audioContextRef.current = audioContext;
       debugLog('audio context prepared', { state: audioContext.state, sampleRate: audioContext.sampleRate });
 
-      if (voiceFilterMode) {
-        startAudioProcessingForFilter(mediaStream);
-        return;
-      }
-
       const realtimeMode = voiceFilterMode ? 'raw' : mode;
       const ws = new WebSocket(
         `${toWebSocketBase(apiBaseUrl)}/ws/asr?user_id=${encodeURIComponent(userID)}&mode=${encodeURIComponent(realtimeMode)}`,
@@ -935,13 +949,13 @@ function App() {
     }
 
     if (message.type === 'input_ready') {
-      if (voiceFilterMode && voiceFilterAppliedTextRef.current) {
-        return;
-      }
       const original = message.original_text ?? rawFinalText;
       const enhanced = message.enhanced_text ?? message.text ?? original;
       const input = message.text ?? enhanced;
       setRawFinalText(original);
+      if (voiceFilterMode && voiceFilterAppliedTextRef.current) {
+        return;
+      }
       setEnhancedText(enhanced);
       setInputBaseline(enhanced);
       setInputText(input);
@@ -959,10 +973,10 @@ function App() {
     }
 
     if (message.type === 'processed') {
+      const output = message.text ?? '';
       if (voiceFilterMode && voiceFilterAppliedTextRef.current) {
         return;
       }
-      const output = message.text ?? '';
       setProcessingState('completed');
       setProcessingSource(message.source ?? '');
       setProcessingLatencyMS(message.latency_ms ?? null);
@@ -1009,7 +1023,15 @@ function App() {
     setWaveLevels(createSilentWave());
 
     if (voiceFilterMode) {
-      void processVoiceFilterAudio();
+      voiceFilterStopRequestedRef.current = true;
+      flushVoiceFilterUtterance(true);
+      const ws = wsRef.current;
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'stop' }));
+      }
+      if (voiceFilterInFlightRef.current === 0) {
+        finishVoiceFilterRecording();
+      }
       return;
     }
 
@@ -1025,24 +1047,91 @@ function App() {
   function resetVoiceFilterState() {
     audioBufferRef.current = [];
     voiceFilterAppliedTextRef.current = '';
+    voiceFilterPreRollRef.current = [];
+    voiceFilterUtteranceRef.current = [];
+    voiceFilterUtteranceSamplesRef.current = 0;
+    voiceFilterPreRollSamplesRef.current = 0;
+    voiceFilterSilenceMSRef.current = 0;
+    voiceFilterSpeechActiveRef.current = false;
+    voiceFilterSegmentSeqRef.current = 0;
+    voiceFilterInFlightRef.current = 0;
+    voiceFilterStopRequestedRef.current = false;
+    voiceFilterTextPartsRef.current = [];
+    voiceFilterSentencesRef.current = [];
+    voiceFilterSpeakerCountRef.current = 0;
     setVoiceFilterLoading(false);
     setVoiceFilterResult(null);
   }
 
-  async function processVoiceFilterAudio() {
-    const buffers = audioBufferRef.current;
-    debugLog('voice filter: stop received', { bufferCount: buffers.length });
-    if (buffers.length === 0) {
-      setRecordingStateSafe('completed');
+  function appendVoiceFilterFrame(samples: Float32Array, level: number, peakLevel: number) {
+    const frameMS = samples.length / targetSampleRate * 1000;
+    const isSpeech = level >= voiceFilterSpeechRMS || peakLevel >= voiceFilterSpeechPeak;
+
+    if (!voiceFilterSpeechActiveRef.current && isSpeech) {
+      voiceFilterSpeechActiveRef.current = true;
+      voiceFilterUtteranceRef.current = [...voiceFilterPreRollRef.current];
+      voiceFilterUtteranceSamplesRef.current = voiceFilterPreRollSamplesRef.current;
+      voiceFilterSilenceMSRef.current = 0;
+      debugLog('voice filter: utterance started', { level, peakLevel });
+    }
+
+    if (voiceFilterSpeechActiveRef.current) {
+      voiceFilterUtteranceRef.current.push(samples);
+      voiceFilterUtteranceSamplesRef.current += samples.length;
+      voiceFilterSilenceMSRef.current = isSpeech ? 0 : voiceFilterSilenceMSRef.current + frameMS;
+
+      const utteranceMS = voiceFilterUtteranceSamplesRef.current / targetSampleRate * 1000;
+      if (
+        (utteranceMS >= voiceFilterPreferredUtteranceMS && voiceFilterSilenceMSRef.current >= voiceFilterSilenceMS) ||
+        utteranceMS >= voiceFilterMaxUtteranceMS
+      ) {
+        flushVoiceFilterUtterance(false);
+      }
       return;
     }
 
+    voiceFilterPreRollRef.current.push(samples);
+    voiceFilterPreRollSamplesRef.current += samples.length;
+    const maxPreRollSamples = Math.round(targetSampleRate * voiceFilterPreRollMS / 1000);
+    while (voiceFilterPreRollSamplesRef.current > maxPreRollSamples && voiceFilterPreRollRef.current.length > 0) {
+      const removed = voiceFilterPreRollRef.current.shift();
+      voiceFilterPreRollSamplesRef.current -= removed?.length ?? 0;
+    }
+  }
+
+  function flushVoiceFilterUtterance(force: boolean) {
+    const buffers = voiceFilterUtteranceRef.current;
+    const sampleCount = voiceFilterUtteranceSamplesRef.current;
+    const utteranceMS = sampleCount / targetSampleRate * 1000;
+
+    voiceFilterUtteranceRef.current = [];
+    voiceFilterUtteranceSamplesRef.current = 0;
+    voiceFilterSilenceMSRef.current = 0;
+    voiceFilterSpeechActiveRef.current = false;
+    voiceFilterPreRollRef.current = [];
+    voiceFilterPreRollSamplesRef.current = 0;
+
+    if (buffers.length === 0) {
+      return;
+    }
+    if (!force && utteranceMS < voiceFilterMinUtteranceMS) {
+      debugLog('voice filter: skip short utterance', { utteranceMS: Math.round(utteranceMS) });
+      return;
+    }
+
+    const seq = voiceFilterSegmentSeqRef.current;
+    voiceFilterSegmentSeqRef.current += 1;
+    void processVoiceFilterUtterance(seq, buffers, force);
+  }
+
+  async function processVoiceFilterUtterance(seq: number, buffers: Float32Array[], isFinal: boolean) {
+    debugLog('voice filter: utterance received', { seq, isFinal, bufferCount: buffers.length });
+
     setVoiceFilterLoading(true);
-    setVoiceFilterResult(null);
+    voiceFilterInFlightRef.current += 1;
 
     try {
       const totalLength = buffers.reduce((s, b) => s + b.length, 0);
-      setLiveText('\u6b63\u5728\u6574\u7406\u5f55\u97f3...');
       const combined = new Float32Array(totalLength);
       let offset = 0;
       for (const buf of buffers) {
@@ -1050,20 +1139,14 @@ function App() {
         offset += buf.length;
       }
 
-      setLiveText('\u6b63\u5728\u51c6\u5907\u79bb\u7ebf\u8bc6\u522b...');
-      const inputSampleRate = voiceFilterSampleRateRef.current || targetSampleRate;
-      const downsampled = downsample(combined, inputSampleRate, targetSampleRate);
-      const wav = encodeWAV(downsampled, targetSampleRate);
-      debugLog('voice filter: wav encoded', {
-        inputSampleRate,
-        outputSampleRate: targetSampleRate,
+      const wav = encodeWAV(combined, targetSampleRate);
+      debugLog('voice filter: utterance wav encoded', {
+        seq,
         inputSamples: combined.length,
-        outputSamples: downsampled.length,
         wavBytes: wav.byteLength,
-        durationS: (downsampled.length / targetSampleRate).toFixed(1),
+        durationS: (combined.length / targetSampleRate).toFixed(1),
       });
 
-      setLiveText(text.voiceFilterWorking);
       const response = await fetch(apiBaseUrl + '/api/transcribe/file', {
         method: 'POST',
         body: wav,
@@ -1079,47 +1162,69 @@ function App() {
         throw new Error(payload.error || 'HTTP ' + response.status);
       }
 
-      debugLog('voice filter: result', { sentences: payload.sentences?.length, speakers: payload.speaker_count });
+      debugLog('voice filter: utterance result', { seq, sentences: payload.sentences?.length, speakers: payload.speaker_count });
       const sentences = payload.sentences || [];
       debugLog('voice filter: sentences sample', sentences.slice(0, 5).map((sentence) => ({
         speakerID: sentence.speaker_id,
         textLength: sentence.text.length,
         textPreview: sentence.text.slice(0, 50),
       })));
-      setVoiceFilterResult({
-        sentences,
-        speaker_count: payload.speaker_count || 0,
-      });
       const firstSpeakerID = firstSpeakerIDFromSentences(sentences);
       const userText = firstSpeakerID === null
         ? (payload.full_text || '')
         : textForSpeaker(sentences, firstSpeakerID);
       debugLog('voice filter: selected user speaker', {
+        seq,
         firstSpeakerID,
         userTextLength: userText.length,
         fullTextLength: payload.full_text?.length ?? 0,
         userTextPreview: userText.slice(0, 80),
       });
+
+      if (!userText.trim()) {
+        return;
+      }
+
+      voiceFilterTextPartsRef.current[seq] = userText;
+      voiceFilterSentencesRef.current = [...voiceFilterSentencesRef.current, ...sentences];
+      voiceFilterSpeakerCountRef.current = Math.max(voiceFilterSpeakerCountRef.current, payload.speaker_count || 0);
+
+      const visibleText = voiceFilterTextPartsRef.current.filter(Boolean).join('');
+      voiceFilterAppliedTextRef.current = visibleText;
       setSelectedSpeaker(firstSpeakerID === null ? 'all' : String(firstSpeakerID));
-      setRawFinalText(userText);
-      setEnhancedText(userText);
-      setInputBaseline(userText);
-      setInputText(userText);
-      resetManualEditTracking(userText);
-      setLiveText(userText);
+      setVoiceFilterResult({
+        sentences: voiceFilterSentencesRef.current,
+        speaker_count: voiceFilterSpeakerCountRef.current,
+      });
+      setEnhancedText(visibleText);
+      setInputBaseline(visibleText);
+      setInputText(visibleText);
+      resetManualEditTracking(visibleText);
       setCommitMessage(firstSpeakerID === null ? text.autoWaiting : text.voiceFilterApplied);
       debugLog('voice filter: wrote filtered text before commit', {
-        rawFinalLength: userText.length,
-        inputTextLength: userText.length,
+        seq,
+        rawFinalLength: visibleText.length,
+        inputTextLength: visibleText.length,
       });
-      await processVoiceFilterInput(userText);
     } catch (err) {
       debugLog('voice filter: failed', err instanceof Error ? err.message : err);
       setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setVoiceFilterLoading(false);
-      setRecordingStateSafe('completed');
-      audioBufferRef.current = [];
+      voiceFilterInFlightRef.current = Math.max(0, voiceFilterInFlightRef.current - 1);
+      if (voiceFilterStopRequestedRef.current && voiceFilterInFlightRef.current === 0) {
+        finishVoiceFilterRecording();
+      } else if (voiceFilterInFlightRef.current === 0) {
+        setVoiceFilterLoading(false);
+      }
+    }
+  }
+
+  function finishVoiceFilterRecording() {
+    setVoiceFilterLoading(false);
+    setRecordingStateSafe('completed');
+    audioBufferRef.current = [];
+    if (voiceFilterAppliedTextRef.current.trim()) {
+      void processVoiceFilterInput(voiceFilterAppliedTextRef.current);
     }
   }
 
@@ -1145,17 +1250,19 @@ function App() {
       const level = calculateRMS(input);
       const peakLevel = calculatePeak(input);
       const normalizedLevel = normalizeVoiceLevel(level, peakLevel);
-      audioBufferRef.current.push(new Float32Array(input));
+      const downsampled = downsample(input, audioContext.sampleRate, targetSampleRate);
+      voiceFrameCountRef.current += 1;
+      appendVoiceFilterFrame(downsampled, level, peakLevel);
       setWaveLevels((levels) => [...levels.slice(1), normalizedLevel]);
       setRecorderStats((stats) => ({
         frames: stats.frames + 1,
-        bytes: stats.bytes + input.byteLength,
+        bytes: stats.bytes + downsampled.byteLength,
         level,
         peakLevel: Math.max(stats.peakLevel, peakLevel),
       }));
-      if (debugEnabled && audioBufferRef.current.length % 80 === 1) {
+      if (debugEnabled && voiceFrameCountRef.current % 80 === 1) {
         debugLog('voice filter: audio buffered', {
-          buffers: audioBufferRef.current.length,
+          utteranceSamples: voiceFilterUtteranceSamplesRef.current,
           level,
           peakLevel,
           normalizedLevel,
@@ -1168,6 +1275,7 @@ function App() {
     sourceRef.current = source;
     processorRef.current = processor;
     setRecordingStateSafe('recording');
+    voiceFrameCountRef.current = 0;
     debugLog('voice filter recording started', { inputSampleRate: audioContext.sampleRate, targetSampleRate });
   }
 
@@ -1652,10 +1760,8 @@ function App() {
                 <button type="button" onClick={() => {
                   setSelectedSpeaker('all');
                   const all = voiceFilterResult.sentences.map((sentence) => sentence.text).join('');
-                  setRawFinalText(all);
                   setInputText(all);
                   resetManualEditTracking(all);
-                  setLiveText(all);
                 }}>
                   {'\u663e\u793a\u5168\u90e8'}
                 </button>
