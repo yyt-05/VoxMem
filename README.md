@@ -96,7 +96,7 @@ $env:VITE_API_BASE_URL = "http://127.0.0.1:8080"
 npm run dev
 ```
 
-## Mock 模式启动（无 API Key 兜底演示）
+## Mock 模式启动
 
 如果没有可用的 DashScope API Key，可以使用 Mock ASR 模式演示页面、录音交互、文本编辑、本地记忆和指标流程。
 
